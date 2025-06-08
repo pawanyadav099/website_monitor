@@ -37,7 +37,6 @@ URLS = [
             #Keral
             "https://www.keralapsc.gov.in/notifications",
             "https://jobs.kpesrb.kerala.gov.in/index.php/LatestNotifications",
-            "https://www.keralagovtjobs.in/",
             "https://cmd.kerala.gov.in/recruitment/",
             #Meghalaya
             "https://mpsc.nic.in/advertisements.html",
