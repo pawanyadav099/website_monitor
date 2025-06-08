@@ -6,6 +6,8 @@ import os
 from datetime import datetime
 from dateutil.parser import parse as date_parse
 
+from url import URLS  # ✅ yahi import hai URL list ke liye
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TOKEN = os.getenv("TOKEN")
@@ -19,7 +21,7 @@ SENT_POSTS_FILE = "sent_posts.txt"
 
 KEYWORDS = [
     "job", "result", "notification", "admit card", "notice", "exam",
-    "interview", "vacancy", "recruitment", "call letter","interview", "merit list"
+    "interview", "vacancy", "recruitment", "call letter", "merit list"
 ]
 
 def contains_keyword(text):
@@ -100,9 +102,7 @@ def parse_and_notify(url, sent_posts):
         return
 
     soup = BeautifulSoup(html, "html.parser")
-
     new_posts = []
-    now = datetime.now()
 
     for a in soup.find_all('a', href=True):
         text = a.get_text(strip=True)
@@ -124,7 +124,6 @@ def parse_and_notify(url, sent_posts):
             continue
 
         is_pdf = href.lower().endswith(".pdf")
-
         post_date = extract_post_date(a)
         if not post_date:
             continue
@@ -144,12 +143,6 @@ def parse_and_notify(url, sent_posts):
         send_telegram(message)
         save_sent_post(post_id)
         print(f"Sent notification for: {post_id}")
-
-# define URLs here or import from url.py
-URLS = [
-    "https://example.com/jobs",
-    "https://example2.com/notifications"
-]
 
 def main():
     print("Monitoring started...")
