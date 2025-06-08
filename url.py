@@ -16,7 +16,6 @@ URLS = [
             "https://websitenew.tspsc.gov.in/GOS.jsp",
             "https://mhsrb.telangana.gov.in/MHSRB/home.htm",
             "https://tshc.gov.in/showChildDocTypes?id=95",
-            "https://www.freshersnow.com/telangana-govt-jobs/",
             #Nagaland
             "https://npsc.nagaland.gov.in/notification",
             "https://npsc.nagaland.gov.in/latest-updates",
@@ -73,8 +72,6 @@ URLS = [
             "https://uppsc.up.nic.in/CandidatePages/Notifications.aspx",
             "https://uppsc.up.nic.in/Default.aspx",
             "https://sewayojan.up.nic.in/jobs.aspx",
-            "https://www.kirannewsagency.com/job/uttar-pradesh-govt-job.aspx",
-            "https://www.upcareers.in/up-govt-jobs/",
             "https://upsssc.gov.in/News.aspx?id=1",
             "https://upsssc.gov.in/AllNotifications.aspx",
             "https://upsssc.gov.in/Default.aspx",
@@ -86,7 +83,6 @@ URLS = [
             #ssc
             "https://ssc.nic.in/Portal/Notices",
             "https://upsc.gov.in/recruitment/recruitment-advertisements",
-            "https://www.ncs.gov.in/job-seeker/Pages/Search.aspx?OT=fheFJjl41aGWG85YSvGqng%3D%3D&OJ=sdm0Lg%2BxO9o%3D",
             #Railway
             "https://rrbahmedabad.gov.in/recruitment-statistics/",
             "https://rrbajmer.gov.in/CenDetails?CEN=Ooc3BlDvsFno9roRQOw73Q%253d%253d",
