@@ -2,7 +2,7 @@ name: Job Monitor Bot
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # har 10 minute run kare
+    - cron: '*/30 * * * *'  # har 30 minute run kare
   workflow_dispatch:
 
 jobs:
