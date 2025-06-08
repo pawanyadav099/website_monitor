@@ -28,4 +28,4 @@ jobs:
         TOKEN: ${{ secrets.TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
       run: |
-        python monitor.py
+        python a.py
