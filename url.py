@@ -1,10 +1,12 @@
 # url.py
 URLS = [
             #NTA
-            "https://neet.nta.nic.in/public-notices/"
-            "https://neet.nta.nic.in/examination-schedule/"
+            "https://neet.nta.nic.in/public-notices/",
+            "https://neet.nta.nic.in/examination-schedule/",
             #Neet
-            "https://natboard.edu.in/allnotice.php"
+            "https://natboard.edu.in/allnotice.php",
+            #SSC
+            "https://ssc.gov.in/home/notice-board",
             #Sikkim
             "https://spsc.sikkim.gov.in/Advertisement.html",
             "spsc.sikkim.gov.in/Notices.html",
@@ -13,7 +15,6 @@ URLS = [
             #Tamilnadu
             "https://tnpsc.gov.in/english/notification.aspx",
             "https://www.tnpsc.gov.in/english/latest_results.aspx",
-            "https://tamilanguide.in/tn-govt-jobs-2019-2020/",
             #Telangana
             "https://websitenew.tspsc.gov.in/notifications",
             "https://websitenew.tspsc.gov.in/Results",
@@ -25,10 +26,8 @@ URLS = [
             "https://npsc.nagaland.gov.in/latest-updates",
             "https://dpar.nagaland.gov.in/notifications/",
             #Odisha
-            "https://www.odishagovtjob.in/?m=1",
             "https://odisha.gov.in/publication/advertisement",
             "https://www.ossc.gov.in/Public/Pages/View_Content.aspx?id=MeNGKau42B9VX4Nn6oZfXA==",
-            "https://www.nuaodisha.com/viewjoblist.aspx",
             #Jharkhand
             "https://www.jharkhandjob.in/",
             "https://www.jpsc.gov.in/Examination-Links.php",
@@ -86,12 +85,12 @@ URLS = [
             "https://upsc.gov.in/recruitment/recruitment-advertisements",
             #Railway
             "https://rrbahmedabad.gov.in/recruitment-statistics/",
-            "arunachalpradesh.gov.in"
+            "arunachalpradesh.gov.in",
             #Assam
-            "https://apsc.nic.in/advt_2025.php"
-            "https://apscrecruitment.in/#/auth/landing"
-            "https://slprbassam.in/"
-            "https://job.assam.gov.in/jobs/"
+            "https://apsc.nic.in/advt_2025.php",
+            "https://apscrecruitment.in/#/auth/landing",
+            "https://slprbassam.in/",
+            "https://job.assam.gov.in/jobs/",
             #Uttar Pradesh
             "https://uppsc.up.nic.in/CandidatePages/Notifications.aspx",
             "https://uppsc.up.nic.in/Default.aspx",
