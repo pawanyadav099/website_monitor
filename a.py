@@ -5,8 +5,10 @@ import urllib3
 import os
 from datetime import datetime
 from dateutil.parser import parse as date_parse
+from urllib.parse import urljoin, urlparse
+import fitz  # PyMuPDF
 
-from url import URLS  # ✅ yahi import hai URL list ke liye
+from url import URLS  # Make sure this file exists with valid URL list
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -21,12 +23,11 @@ SENT_POSTS_FILE = "sent_posts.txt"
 
 KEYWORDS = [
     "job", "result", "notification", "admit card", "notice", "exam",
-    "interview", "vacancy", "recruitment", "call letter", "merit list","Neet"
+    "interview", "vacancy", "recruitment", "call letter", "merit list"
 ]
 
 def contains_keyword(text):
-    text_lower = text.lower()
-    return any(keyword in text_lower for keyword in KEYWORDS)
+    return any(keyword in text.lower() for keyword in KEYWORDS)
 
 def load_sent_posts():
     if not os.path.exists(SENT_POSTS_FILE):
@@ -56,44 +57,80 @@ def fetch(url):
         resp = requests.get(url, headers=HEADERS, timeout=10, verify=False)
         resp.raise_for_status()
         return resp.text
-    except requests.exceptions.SSLError as ssl_err:
-        print(f"SSL Error for {url}: {ssl_err}. Trying httpx fallback...")
+    except requests.exceptions.SSLError:
         try:
             with httpx.Client(verify=False, timeout=10) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
                 return resp.text
-        except Exception as e:
-            print(f"HTTPX fallback failed for {url}: {e}")
+        except:
             return None
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
+    except:
         return None
 
-def extract_post_date(a_tag):
+def extract_date_from_text(text):
+    try:
+        return date_parse(text, fuzzy=True, dayfirst=True)
+    except:
+        return None
+
+def extract_date_from_pdf(pdf_url):
+    try:
+        r = requests.get(pdf_url, stream=True, timeout=10)
+        if r.status_code != 200:
+            return None
+        with open("temp.pdf", "wb") as f:
+            f.write(r.content)
+
+        doc = fitz.open("temp.pdf")
+        text = ""
+        for page in doc:
+            text += page.get_text()
+
+        doc.close()
+        os.remove("temp.pdf")
+
+        return extract_date_from_text(text)
+    except Exception as e:
+        print(f"PDF extract error: {e}")
+        return None
+
+def extract_date(a_tag, url):
     now = datetime.now()
-    candidates = []
+    possible_sources = []
 
     title_attr = a_tag.get('title')
     if title_attr:
-        candidates.append(title_attr)
+        possible_sources.append(title_attr)
 
-    next_sibling = a_tag.find_next_sibling(text=True)
-    if next_sibling and isinstance(next_sibling, str):
-        candidates.append(next_sibling.strip())
+    sibling = a_tag.find_next_sibling(text=True)
+    if sibling:
+        possible_sources.append(sibling.strip())
 
-    parent_text = a_tag.parent.get_text(" ", strip=True) if a_tag.parent else ""
-    candidates.append(parent_text)
+    if a_tag.parent:
+        possible_sources.append(a_tag.parent.get_text(" ", strip=True))
+    if a_tag.parent and a_tag.parent.parent:
+        possible_sources.append(a_tag.parent.parent.get_text(" ", strip=True))
 
-    for text in candidates:
-        try:
-            dt = date_parse(text, fuzzy=True, dayfirst=True)
-            if dt.year == now.year and dt.month == now.month:
-                return dt
-        except Exception:
-            continue
+    for text in possible_sources:
+        dt = extract_date_from_text(text)
+        if dt and dt.year >= now.year and dt.month >= now.month:
+            return dt
 
-    return None
+    href = a_tag['href']
+    if href.lower().endswith(".pdf"):
+        pdf_date = extract_date_from_pdf(href)
+        if pdf_date and pdf_date.year >= now.year and pdf_date.month >= now.month:
+            return pdf_date
+
+    # Try URL
+    path = urlparse(href).path
+    for part in path.split("/"):
+        dt = extract_date_from_text(part)
+        if dt and dt.year >= now.year and dt.month >= now.month:
+            return dt
+
+    return "Date not found"
 
 def parse_and_notify(url, sent_posts):
     html = fetch(url)
@@ -107,44 +144,30 @@ def parse_and_notify(url, sent_posts):
     for a in soup.find_all('a', href=True):
         text = a.get_text(strip=True)
         href = a['href']
-
-        if not text or not href:
-            continue
-
-        if not contains_keyword(text):
+        if not text or not href or not contains_keyword(text):
             continue
 
         if href.startswith("/"):
-            from urllib.parse import urljoin
             href = urljoin(url, href)
 
-        # ✅ More reliable post_id: text + href
-        post_id = f"{text.strip()}|{href.strip()}"
-
+        post_id = text.strip() + "|" + href.strip()
         if post_id in sent_posts:
             continue
 
-        is_pdf = href.lower().endswith(".pdf")
-        post_date = extract_post_date(a)
-        if not post_date:
-            continue
+        date_info = extract_date(a, url)
+        date_str = date_info.strftime("%Y-%m-%d") if isinstance(date_info, datetime) else date_info
 
-        if is_pdf:
-            message = f"New PDF detected on {url}:\nTitle: {text}\nPDF Link: {href}\nDate: {post_date.strftime('%Y-%m-%d')}"
+        if href.lower().endswith(".pdf"):
+            message = f"📄 New PDF:\nTitle: {text}\nLink: {href}\nDate: {date_str}"
         else:
-            message = f"New post on {url}:\nTitle: {text}\nLink: {href}\nDate: {post_date.strftime('%Y-%m-%d')}"
+            message = f"📝 New Post:\nTitle: {text}\nLink: {href}\nDate: {date_str}"
 
         new_posts.append((post_id, message))
-
-    if not new_posts:
-        print(f"No new relevant posts found on {url} for current month")
-        return
 
     for post_id, message in new_posts:
         send_telegram(message)
         save_sent_post(post_id)
-        sent_posts.add(post_id)  # ✅ important to prevent same run duplicates
-        print(f"Sent notification for: {post_id}")
+        print(f"Sent: {post_id}")
 
 def main():
     print("Monitoring started...")
