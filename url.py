@@ -9,7 +9,6 @@ URLS = [
             "https://tnpsc.gov.in/english/notification.aspx",
             "https://www.tnpsc.gov.in/english/latest_results.aspx",
             "https://tamilanguide.in/tn-govt-jobs-2019-2020/",
-            "https://tamilnadurecruitment.com/tn-govt-jobs/",
             #Telangana
             "https://websitenew.tspsc.gov.in/notifications",
             "https://websitenew.tspsc.gov.in/Results",
@@ -83,4 +82,9 @@ URLS = [
             #Railway
             "https://rrbahmedabad.gov.in/recruitment-statistics/",
             "arunachalpradesh.gov.in"
+            #Assam
+            "https://apsc.nic.in/advt_2025.php"
+            "https://apscrecruitment.in/#/auth/landing"
+            "https://slprbassam.in/"
+            "https://job.assam.gov.in/jobs/"
         ]
