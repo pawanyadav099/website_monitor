@@ -43,7 +43,7 @@ jobs:
           TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python job_notification_scraper.py
+          python a.py
 
       # Upload sent_posts.txt as an artifact for debugging
       - name: Upload sent_posts.txt
