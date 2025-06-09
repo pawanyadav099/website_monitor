@@ -21,7 +21,7 @@ SENT_POSTS_FILE = "sent_posts.txt"
 
 KEYWORDS = [
     "job", "result", "notification", "admit card", "notice", "exam",
-    "interview", "vacancy", "recruitment", "call letter", "merit list"
+    "interview", "vacancy", "recruitment", "call letter", "merit list","Neet"
 ]
 
 def contains_keyword(text):
