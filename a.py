@@ -8,11 +8,15 @@ from dateutil.parser import parse as date_parse
 from io import BytesIO
 import re
 import PyPDF2
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse
+from dotenv import load_dotenv
 
 from url import URLS  # URL list
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Load environment variables from .env file
+load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -103,14 +107,12 @@ def extract_date_from_text(text):
         if m:
             try:
                 dt = date_parse(m.group(1), dayfirst=True)
-                if dt.year >= datetime.now().year - 1:
-                    return dt
+                return dt
             except:
                 continue
     try:
         dt = date_parse(text, fuzzy=True, dayfirst=True)
-        if dt.year >= datetime.now().year - 1:
-            return dt
+        return dt
     except:
         return None
     return None
@@ -135,7 +137,7 @@ def extract_date_from_pdf(url):
 
         for line in lines:
             dt = extract_date_from_text(line)
-            if dt and dt.year >= datetime.now().year - 1:
+            if dt:
                 date_candidates.append(dt)
 
             if posts_count is None:
@@ -190,7 +192,7 @@ def extract_post_date(a_tag):
 
     for text in candidates:
         dt = extract_date_from_text(text)
-        if dt and (dt.year == now.year and dt.month in [now.month, (now.month % 12) + 1]):
+        if dt and dt.year == now.year and dt.month == now.month:
             return dt
     return None
 
@@ -200,7 +202,7 @@ def extract_date_from_url(url):
         year = int(m.group(1))
         month = int(m.group(2))
         now = datetime.now()
-        if year == now.year and month in [now.month, (now.month % 12) + 1]:
+        if year == now.year and month == now.month:
             return datetime(year, month, 1)
     return None
 
@@ -216,6 +218,15 @@ def is_valid_url(url):
         return result.status_code < 400
     except Exception:
         return False
+
+def is_post_link(href, base_url):
+    if not href:
+        return False
+    full_url = normalize_url(href, base_url)
+    base_path = urlparse(base_url).path.rstrip('/')
+    link_path = urlparse(full_url).path.rstrip('/')
+    return (full_url.lower().endswith('.pdf') or
+            link_path.startswith(base_path))
 
 def parse_and_notify(url, sent_posts):
     html = fetch(url)
@@ -238,8 +249,12 @@ def parse_and_notify(url, sent_posts):
             print(f"Skipping non-relevant link: {text}")
             continue
 
+        if not is_post_link(href, url):
+            print(f"Skipping non-post link: {href}")
+            continue
+
         post_id = normalize_url(href, url)
-        print(f"Processing link: {href} -> Resolved to: {post_id}")
+        print(f"Processing post: {href} -> Resolved to: {post_id}")
 
         if post_id in sent_posts:
             print(f"Skipping already sent post: {post_id}")
@@ -247,52 +262,35 @@ def parse_and_notify(url, sent_posts):
 
         post_date = extract_post_date(a)
         pdf_data = None
-        if href.lower().endswith(".pdf"):
+        if post_id.lower().endswith('.pdf'):
             pdf_data = extract_date_from_pdf(post_id)
-            if pdf_data and pdf_data["post_date"]:
+            if pdf_data and pdf_data["post_date"] and pdf_data["post_date"].year == datetime.now().year and pdf_data["post_date"].month == datetime.now().month:
                 post_date = pdf_data["post_date"]
 
         if not post_date:
             post_date = extract_date_from_url(post_id)
 
-        now = datetime.now()
-        date_ok = False
-        if post_date:
-            if (post_date.year == now.year) and (post_date.month in [now.month, (now.month % 12) + 1]):
-                date_ok = True
-        if not date_ok:
-            print(f"Skipping post {post_id}: Date {post_date} not found or too old")
+        if not post_date or not (post_date.year == datetime.now().year and post_date.month == datetime.now().month):
+            print(f"Skipping post {post_id}: Date {post_date} not in current month")
             continue
 
         msg = f"*New Notification*\n\n"
         msg += f"Website URL: {url}\n"
         msg += f"Notification Title: {text or 'Untitled Notification'}\n"
-        if is_valid_url(post_id):
-            msg += f"Notification URL: {post_id}\n"
-        else:
-            msg += f"Notification URL: _Invalid or unreachable URL_\n"
-        
-        if pdf_data and pdf_data["publish_date"]:
-            msg += f"Publish Date: {pdf_data['publish_date'].strftime('%Y-%m-%d')}\n"
-        elif post_date:
-            msg += f"Publish Date: {post_date.strftime('%Y-%m-%d')}\n"
-        else:
-            msg += f"Publish Date: _Not found_\n"
-        
-        if pdf_data:
-            msg += f"PDF URL: {pdf_data['pdf_url']}\n"
-        else:
-            msg += f"PDF URL: _Not applicable_\n"
+        msg += f"Notification URL: {post_id if is_valid_url(post_id) else '_Invalid or unreachable URL_'}\n"
+        msg += f"Publish Date: {(pdf_data['publish_date'] or post_date).strftime('%Y-%m-%d') if (pdf_data and pdf_data['publish_date']) or post_date else '_Not found_'}\n"
+        msg += f"PDF URL: {pdf_data['pdf_url'] if pdf_data else '_Not applicable_'}\n"
 
         new_posts.append((post_id, msg))
 
     if not new_posts:
-        print(f"No new relevant posts found on {url} for current/next month")
+        print(f"No new relevant posts found on {url} for current month")
         return
 
     for post_id, message in new_posts:
         send_telegram(message)
         save_sent_post(post_id)
+        sent_posts.add(post_id)  # Update in-memory set to prevent duplicates in same run
         print(f"Sent notification for: {post_id}")
 
 def main():
