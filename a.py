@@ -118,7 +118,8 @@ def parse_and_notify(url, sent_posts):
             from urllib.parse import urljoin
             href = urljoin(url, href)
 
-        post_id = href.strip()
+        # ✅ More reliable post_id: text + href
+        post_id = f"{text.strip()}|{href.strip()}"
 
         if post_id in sent_posts:
             continue
@@ -142,6 +143,7 @@ def parse_and_notify(url, sent_posts):
     for post_id, message in new_posts:
         send_telegram(message)
         save_sent_post(post_id)
+        sent_posts.add(post_id)  # ✅ important to prevent same run duplicates
         print(f"Sent notification for: {post_id}")
 
 def main():
