@@ -29,7 +29,6 @@ URLS = [
             "https://odisha.gov.in/publication/advertisement",
             "https://www.ossc.gov.in/Public/Pages/View_Content.aspx?id=MeNGKau42B9VX4Nn6oZfXA==",
             #Jharkhand
-            "https://www.jharkhandjob.in/",
             "https://www.jpsc.gov.in/Examination-Links.php",
             "https://ranchi.nic.in/notice_category/recruitment/",
             "https://www.sameti.org/vaccancy.php",
