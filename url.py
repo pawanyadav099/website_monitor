@@ -87,4 +87,16 @@ URLS = [
             "https://apscrecruitment.in/#/auth/landing"
             "https://slprbassam.in/"
             "https://job.assam.gov.in/jobs/"
+            #Uttar Pradesh
+            "https://uppsc.up.nic.in/CandidatePages/Notifications.aspx",
+            "https://uppsc.up.nic.in/Default.aspx",
+            "https://sewayojan.up.nic.in/jobs.aspx",
+            "https://upsssc.gov.in/News.aspx?id=1",
+            "https://upsssc.gov.in/AllNotifications.aspx",
+            "https://upsssc.gov.in/Default.aspx",
+            "https://uppbpb.gov.in/",
+            "https://uppbpb.gov.in/Home/Notice",
+            "https://uppbpb.gov.in/Home/Notice#",
+            "https://uppbpb.gov.in/Home/DirectRecruitment",
+            "https://uppbpb.gov.in/Home/Result"
         ]
