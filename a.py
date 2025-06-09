@@ -29,7 +29,8 @@ SENT_POSTS_FILE = "sent_posts.txt"
 
 KEYWORDS = [
     "job", "result", "notification", "admit card", "notice", "exam",
-    "interview", "vacancy", "recruitment", "call letter", "merit list"
+    "interview", "vacancy", "recruitment", "call letter", "merit list",
+    "schedule", "announcement", "bulletin"
 ]
 
 def contains_keyword(text):
@@ -182,7 +183,7 @@ def extract_post_date(a_tag):
     if title_attr:
         candidates.append(title_attr)
 
-    next_sibling = a_tag.find_next_sibling(text=True)
+    next_sibling = a_tag.find_next_sibling(string=True)
     if next_sibling and isinstance(next_sibling, str):
         candidates.append(next_sibling.strip())
 
@@ -223,7 +224,7 @@ def is_post_link(href, base_url):
     if not href:
         return False
     full_url = normalize_url(href, base_url)
-    return full_url.lower().endswith('.pdf') or contains_keyword(href)
+    return full_url.lower().endswith('.pdf') or contains_keyword(full_url) or contains_keyword(href)
 
 def parse_and_notify(url, sent_posts):
     html = fetch(url)
@@ -278,7 +279,7 @@ def parse_and_notify(url, sent_posts):
         msg += f"Website URL: {url}\n"
         msg += f"Notification Title: {text or 'Untitled Notification'}\n"
         msg += f"Notification URL: {post_id if is_valid_url(post_id) else '_Invalid or unreachable URL_'}\n"
-        msg += f"Publish Date: {(pdf_data.get('publish_date') or post_date).strftime('%Y-%m-%d') if (pdf_data and pdf_data.get('publish_date')) or post_date else '_Not found_'}\n"
+        msg += f"Publish Date: {(pdf_data.get('publish_date') if pdf_data else post_date).strftime('%Y-%m-%d') if (pdf_data and pdf_data.get('publish_date')) or post_date else '_Not found_'}\n"
         msg += f"PDF URL: {pdf_data.get('pdf_url') if pdf_data else '_Not applicable_'}\n"
 
         new_posts.append((post_id, msg))
