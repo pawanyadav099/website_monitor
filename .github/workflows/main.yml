@@ -1,44 +1,56 @@
-name: Job Monitor Bot
+name: Job Notification Scraper
 
 on:
   schedule:
-    - cron: '*/40 * * * *'  # Har 40 minute run kare
-  workflow_dispatch:
+    - cron: '*/40 * * * *'  # Run every 40 minutes
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual triggering
 
 jobs:
-  run-script:
+  scrape-and-notify:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4  # ✅ v4 is better, more secure and latest
+      # Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Restore sent_posts.txt (if exists)
-      uses: actions/download-artifact@v4
-      with:
-        name: sent-posts
-        path: .
-      continue-on-error: true  # ✅ So first run doesn't fail if artifact not present
+      # Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'  # Use a stable Python version
+          cache: 'pip'
 
-    - name: Set up Python
-      uses: actions/setup-python@v5  # ✅ Use latest version for better compatibility
-      with:
-        python-version: '3.10'
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests httpx beautifulsoup4 PyPDF2 python-dateutil
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt  # ✅ Better to use a single requirements file
+      # Optional: Clear sent_posts.txt to avoid stale data (commented out to persist data)
+      # - name: Clear sent_posts.txt
+      #   run: |
+      #     if [ -f sent_posts.txt ]; then
+      #       rm sent_posts.txt
+      #       echo "Cleared sent_posts.txt"
+      #     fi
 
-    - name: Run monitor script
-      env:
-        TOKEN: ${{ secrets.TOKEN }}
-        CHAT_ID: ${{ secrets.CHAT_ID }}
-      run: python a.py
+      # Run the scraper script
+      - name: Run scraper
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python job_notification_scraper.py
 
-    - name: Upload sent_posts.txt
-      if: always()  # ✅ ensures even if job fails, artifact gets uploaded
-      uses: actions/upload-artifact@v4
-      with:
-        name: sent-posts
-        path: sent_posts.txt
+      # Upload sent_posts.txt as an artifact for debugging
+      - name: Upload sent_posts.txt
+        if: always()  # Upload even if the job fails
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-posts
+          path: sent_posts.txt
+          retention-days: 30
