@@ -2,7 +2,7 @@ name: Job Monitor Bot
 
 on:
   schedule:
-    - cron: '*/40 * * * *'  # har 40 minute run kare
+    - cron: '*/40 * * * *'  # Har 40 minute run kare
   workflow_dispatch:
 
 jobs:
@@ -11,14 +11,7 @@ jobs:
 
     steps:
     - name: Checkout repo
-      uses: actions/checkout@v3
-
-    - name: Restore sent_posts.txt from last run (if exists)
-      uses: actions/download-artifact@v4
-      with:
-        name: sent-posts
-        path: .
-      continue-on-error: true
+      uses: actions/checkout@v4
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -30,16 +23,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests httpx beautifulsoup4 python-dateutil python-dotenv
 
-    - name: Run monitor script
+    - name: Run job monitor script
       env:
         TOKEN: ${{ secrets.TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
       run: |
         python a.py
 
-    - name: Save updated sent_posts.txt
+    - name: Show updated sent_posts.txt
       if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: sent-posts
-        path: sent_posts.txt
+      run: |
+        echo "Recently tracked posts:"
+        cat sent_posts.txt || echo "No file found"
