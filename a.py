@@ -8,6 +8,7 @@ from dateutil.parser import parse as date_parse
 from io import BytesIO
 import re
 import PyPDF2
+from urllib.parse import urljoin, urlparse, urldefrag
 
 from url import URLS  # URL list
 
@@ -28,18 +29,30 @@ KEYWORDS = [
 ]
 
 def contains_keyword(text):
+    if not text:
+        return False
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in KEYWORDS)
 
 def load_sent_posts():
     if not os.path.exists(SENT_POSTS_FILE):
+        print(f"{SENT_POSTS_FILE} not found, starting fresh")
         return set()
-    with open(SENT_POSTS_FILE, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f if line.strip())
+    try:
+        with open(SENT_POSTS_FILE, "r", encoding="utf-8") as f:
+            posts = set(line.strip() for line in f if line.strip())
+            print(f"Loaded {len(posts)} sent posts")
+            return posts
+    except Exception as e:
+        print(f"Error reading {SENT_POSTS_FILE}: {e}")
+        return set()
 
 def save_sent_post(post_id):
-    with open(SENT_POSTS_FILE, "a", encoding="utf-8") as f:
-        f.write(post_id + "\n")
+    try:
+        with open(SENT_POSTS_FILE, "a", encoding="utf-8") as f:
+            f.write(post_id + "\n")
+    except Exception as e:
+        print(f"Error saving post {post_id} to {SENT_POSTS_FILE}: {e}")
 
 def send_telegram(message):
     if not TOKEN or not CHAT_ID:
@@ -55,9 +68,9 @@ def send_telegram(message):
     try:
         r = requests.post(url, data=data)
         if r.status_code != 200:
-            print("Telegram send failed:", r.text)
+            print(f"Telegram send failed: {r.text}")
     except Exception as e:
-        print("Telegram error:", e)
+        print(f"Telegram error: {e}")
 
 def fetch(url):
     try:
@@ -79,16 +92,32 @@ def fetch(url):
         return None
 
 def extract_date_from_text(text):
-    # Try to find date in given text
+    if not text:
+        return None
+    date_patterns = [
+        r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',  # e.g., 01/06/2025 or 01-06-25
+        r'\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})\b'  # e.g., 01 June 2025
+    ]
+    for pattern in date_patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            try:
+                dt = date_parse(m.group(1), dayfirst=True)
+                if dt.year >= datetime.now().year - 1:
+                    return dt
+            except:
+                continue
     try:
         dt = date_parse(text, fuzzy=True, dayfirst=True)
-        return dt
-    except Exception:
+        if dt.year >= datetime.now().year - 1:
+            return dt
+    except:
         return None
+    return None
 
 def extract_date_from_pdf(url):
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, headers=HEADERS, timeout=15, verify=False)
         r.raise_for_status()
         pdf_file = BytesIO(r.content)
         reader = PyPDF2.PdfReader(pdf_file)
@@ -98,7 +127,6 @@ def extract_date_from_pdf(url):
             if page_text:
                 full_text += page_text + "\n"
 
-        # Search for date candidates in text lines
         lines = full_text.splitlines()
         date_candidates = []
         posts_count = None
@@ -106,24 +134,20 @@ def extract_date_from_pdf(url):
         publish_date = None
 
         for line in lines:
-            # Extract date
             dt = extract_date_from_text(line)
-            if dt and dt.year >= datetime.now().year-1:
+            if dt and dt.year >= datetime.now().year - 1:
                 date_candidates.append(dt)
 
-            # Extract total posts/vacancy count (example regex)
             if posts_count is None:
                 m = re.search(r'(total|vacancy|posts?|positions?)[:\s]*([0-9,]+)', line, re.I)
                 if m:
                     posts_count = m.group(2).strip()
 
-            # Extract application fee (example regex)
             if application_fee is None:
                 m = re.search(r'(application fee|fee)[:\s]*₹?\s*([\d,]+)', line, re.I)
                 if m:
                     application_fee = m.group(2).strip()
 
-            # Extract publish date if mentioned separately
             if publish_date is None:
                 m = re.search(r'(published|date of issue|notification date|publish date)[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', line, re.I)
                 if m:
@@ -132,7 +156,6 @@ def extract_date_from_pdf(url):
                     except:
                         pass
 
-        # Pick earliest date from candidates as post date
         post_date = min(date_candidates) if date_candidates else None
 
         return {
@@ -141,9 +164,8 @@ def extract_date_from_pdf(url):
             "application_fee": application_fee,
             "publish_date": publish_date,
             "pdf_url": url,
-            "pdf_text_snippet": full_text[:500]  # first 500 chars as snippet if needed
+            "pdf_text_snippet": full_text[:500]
         }
-
     except Exception as e:
         print(f"Error extracting PDF: {e}")
         return None
@@ -168,21 +190,32 @@ def extract_post_date(a_tag):
 
     for text in candidates:
         dt = extract_date_from_text(text)
-        if dt and (dt.year == now.year and dt.month in [now.month, now.month + 1]):
+        if dt and (dt.year == now.year and dt.month in [now.month, (now.month % 12) + 1]):
             return dt
-
     return None
 
 def extract_date_from_url(url):
-    # Example pattern: /2025/06/ or /2025-06/
     m = re.search(r'/(\d{4})[/-](\d{1,2})/', url)
     if m:
         year = int(m.group(1))
         month = int(m.group(2))
         now = datetime.now()
-        if year == now.year and month in [now.month, now.month + 1]:
+        if year == now.year and month in [now.month, (now.month % 12) + 1]:
             return datetime(year, month, 1)
     return None
+
+def normalize_url(url, base_url):
+    full_url = urljoin(base_url, url)
+    parsed = urlparse(full_url)
+    clean_url = parsed.scheme + "://" + parsed.netloc + parsed.path
+    return clean_url.rstrip('/')
+
+def is_valid_url(url):
+    try:
+        result = requests.head(url, headers=HEADERS, timeout=5, allow_redirects=True, verify=False)
+        return result.status_code < 400
+    except Exception:
+        return False
 
 def parse_and_notify(url, sent_posts):
     html = fetch(url)
@@ -198,70 +231,58 @@ def parse_and_notify(url, sent_posts):
         href = a['href']
 
         if not text or not href:
+            print(f"Skipping empty link: {href}")
             continue
 
         if not contains_keyword(text):
+            print(f"Skipping non-relevant link: {text}")
             continue
 
-        if href.startswith("/"):
-            from urllib.parse import urljoin
-            href = urljoin(url, href)
-
-        post_id = href.strip()
+        post_id = normalize_url(href, url)
+        print(f"Processing link: {href} -> Resolved to: {post_id}")
 
         if post_id in sent_posts:
+            print(f"Skipping already sent post: {post_id}")
             continue
 
-        # Try extract date from <a> tag and surroundings
         post_date = extract_post_date(a)
-
-        # If no date, try PDF extraction if href is PDF
         pdf_data = None
         if href.lower().endswith(".pdf"):
-            pdf_data = extract_date_from_pdf(href)
+            pdf_data = extract_date_from_pdf(post_id)
             if pdf_data and pdf_data["post_date"]:
                 post_date = pdf_data["post_date"]
 
-        # If still no date, try URL date
         if not post_date:
-            post_date = extract_date_from_url(href)
+            post_date = extract_date_from_url(post_id)
 
         now = datetime.now()
-        # Check date is current or next month or None (allow date not found but notify with message)
         date_ok = False
         if post_date:
             if (post_date.year == now.year) and (post_date.month in [now.month, (now.month % 12) + 1]):
                 date_ok = True
-        else:
-            # Date not found scenario, we still notify but mention it
-            date_ok = True
-
         if not date_ok:
-            # Old post, skip
+            print(f"Skipping post {post_id}: Date {post_date} not found or too old")
             continue
 
-        # Prepare Telegram message
-        if pdf_data:
-            msg = f"*New PDF Notification*\n\n*Title:* {text}\n*Link:* [PDF here]({pdf_data['pdf_url']})\n"
-            if pdf_data["post_date"]:
-                msg += f"*Date:* {pdf_data['post_date'].strftime('%Y-%m-%d')}\n"
-            else:
-                msg += "_Date not found_\n"
-
-            if pdf_data["posts_count"]:
-                msg += f"*Total Posts/Vacancies:* {pdf_data['posts_count']}\n"
-            if pdf_data["application_fee"]:
-                msg += f"*Application Fee:* ₹{pdf_data['application_fee']}\n"
-            if pdf_data["publish_date"]:
-                msg += f"*Publish Date:* {pdf_data['publish_date'].strftime('%Y-%m-%d')}\n"
-
-            msg += "\n*Note:* This is PDF-based data extraction."
+        msg = f"*New Notification*\n\n"
+        msg += f"Website URL: {url}\n"
+        msg += f"Notification Title: {text or 'Untitled Notification'}\n"
+        if is_valid_url(post_id):
+            msg += f"Notification URL: {post_id}\n"
         else:
-            msg = f"*New Post*\n\n*Title:* {text}\n*Link:* [Here]({post_id})\n"
-            if post_date:
-                msg += f"*Date:* {post_date.strftime('%Y-%m-%d')}\n"
-            else:
-                msg += "_Date not found_\n"
+            msg += f"Notification URL: _Invalid or unreachable URL_\n"
+        
+        if pdf_data and pdf_data["publish_date"]:
+            msg += f"Publish Date: {pdf_data['publish_date'].strftime('%Y-%m-%d')}\n"
+        elif post_date:
+            msg += f"Publish Date: {post_date.strftime('%Y-%m-%d')}\n"
+        else:
+            msg += f"Publish Date: _Not found_\n"
+        
+        if pdf_data:
+            msg += f"PDF URL: {pdf_data['pdf_url']}\n"
+        else:
+            msg += f"PDF URL: _Not applicable_\n"
 
         new_posts.append((post_id, msg))
 
