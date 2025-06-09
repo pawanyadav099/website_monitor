@@ -1,5 +1,10 @@
 # url.py
 URLS = [
+            #NTA
+            "https://neet.nta.nic.in/public-notices/"
+            "https://neet.nta.nic.in/examination-schedule/"
+            #Neet
+            "https://natboard.edu.in/allnotice.php"
             #Sikkim
             "https://spsc.sikkim.gov.in/Advertisement.html",
             "spsc.sikkim.gov.in/Notices.html",
