@@ -3,13 +3,13 @@ import httpx
 from bs4 import BeautifulSoup
 import urllib3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.parser import parse as date_parse
 from io import BytesIO
 import re
 import PyPDF2
 import pdfplumber
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlencode, parse_qs
 from dotenv import load_dotenv
 import logging
 import time
@@ -32,7 +32,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-# Note: load_dotenv() is optional since GitHub Actions sets variables directly
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -43,6 +42,11 @@ if not TOKEN or not CHAT_ID:
     logger.error(f"TOKEN is {'set' if TOKEN else 'not set'}")
     logger.error(f"CHAT_ID is {'set' if CHAT_ID else 'not set'}")
     logger.error("Available environment variables: %s", list(os.environ.keys()))
+    if os.path.exists('.env'):
+        with open('.env', 'r') as f:
+            logger.error("Content of .env file: %s", f.read())
+    else:
+        logger.error(".env file not found")
     exit(1)
 else:
     logger.info("Successfully loaded TOKEN and CHAT_ID")
@@ -68,23 +72,25 @@ def contains_keyword(text):
 
 def load_sent_posts():
     """Load previously sent posts from file."""
+    sent_posts = set()
     if not os.path.exists(SENT_POSTS_FILE):
         logger.info(f"{SENT_POSTS_FILE} not found, starting fresh")
-        return set()
+        return sent_posts
     try:
         with open(SENT_POSTS_FILE, "r", encoding="utf-8") as f:
-            posts = set(line.strip() for line in f if line.strip())
-            logger.info(f"Loaded {len(posts)} sent posts")
-            return posts
+            sent_posts = set(line.strip() for line in f if line.strip())
+        logger.info(f"Loaded {len(sent_posts)} sent posts: {sent_posts}")
+        return sent_posts
     except Exception as e:
         logger.error(f"Error reading {SENT_POSTS_FILE}: {e}")
         return set()
 
 def save_sent_post(post_id):
-    """Save a post ID to the sent posts file."""
+    """Save a post ID to the sent posts file with immediate flush."""
     try:
         with open(SENT_POSTS_FILE, "a", encoding="utf-8") as f:
             f.write(post_id + "\n")
+            f.flush()  # Ensure immediate write
         logger.info(f"Saved post ID: {post_id}")
     except Exception as e:
         logger.error(f"Error saving post {post_id} to {SENT_POSTS_FILE}: {e}")
@@ -282,12 +288,21 @@ def extract_date_from_url(url):
     return None
 
 def normalize_url(url, base_url):
-    """Normalize a URL by resolving relative paths and removing trailing slashes."""
+    """Normalize a URL by resolving relative paths, sorting query parameters, and removing fragments."""
     try:
         full_url = urljoin(base_url, url)
         parsed = urlparse(full_url)
-        clean_url = parsed.scheme + "://" + parsed.netloc + parsed.path
-        return clean_url.rstrip('/')
+        
+        # Sort query parameters for consistency
+        query_params = parse_qs(parsed.query)
+        sorted_query = urlencode({k: v[0] for k, v in sorted(query_params.items())}, doseq=True)
+        
+        # Rebuild URL without fragment
+        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        if sorted_query:
+            clean_url += f"?{sorted_query}"
+        clean_url = clean_url.rstrip('/')
+        return clean_url
     except Exception as e:
         logger.error(f"Error normalizing URL {url}: {e}")
         return url
@@ -309,7 +324,7 @@ def is_post_link(href, base_url):
     return full_url.lower().endswith('.pdf') or contains_keyword(full_url) or contains_keyword(href)
 
 def parse_and_notify(url, sent_posts):
-    """Parse a webpage and send notifications for new relevant posts."""
+    """Parse a webpage and send notifications for new relevant posts in the current week."""
     logger.info(f"Processing URL: {url}")
     html = fetch(url)
     if not html:
@@ -318,6 +333,16 @@ def parse_and_notify(url, sent_posts):
 
     soup = BeautifulSoup(html, "html.parser", from_encoding="utf-8")
     new_posts = []
+
+    # Calculate current week's start (Monday) and end (Sunday)
+    now = datetime.now()
+    start_of_week = now - timedelta(days=now.weekday())  # Monday
+    end_of_week = start_of_week + timedelta(days=6)  # Sunday
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_of_week = end_of_week.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    logger.info(f"Filtering posts for week: {start_of_week.strftime('%Y-%m-%d')} to {end_of_week.strftime('%Y-%m-%d')}")
+    logger.debug(f"Current sent_posts: {sent_posts}")
 
     for a in soup.find_all('a', href=True):
         text = a.get_text(strip=True)
@@ -352,20 +377,19 @@ def parse_and_notify(url, sent_posts):
         if not post_date:
             post_date = extract_date_from_url(post_id)
 
-        now = datetime.now()
         if not post_date:
-            post_date = datetime(now.year, now.month, 1)
-            logger.info(f"No date found for {post_id}, assuming current month: {post_date}")
+            post_date = now
+            logger.info(f"No date found for {post_id}, assuming current date: {post_date}")
 
-        # Only process posts in current month
-        if post_date.year != now.year or post_date.month != now.month:
-            logger.info(f"Skipping post {post_id}: Date {post_date} not in current month")
+        # Only process posts in the current week
+        if not (start_of_week <= post_date <= end_of_week):
+            logger.info(f"Skipping post {post_id}: Date {post_date.strftime('%Y-%m-%d')} not in current week")
             continue
 
         msg = f"*New Notification*\n\n"
-        msg += f"Website URL: {url}\n"
-        msg += f"Notification Title: {text or 'Untitled Notification'}\n"
-        msg += f"Notification URL: {post_id}\n"
+        msg += f"Website: {url}\n"
+        msg += f"Title: {text or 'Untitled Notification'}\n"
+        msg += f"URL: {post_id}\n"
         publish_date = pdf_data.get('publish_date') if pdf_data else post_date
         msg += f"Publish Date: {publish_date.strftime('%Y-%m-%d') if publish_date else '_Not found_'}\n"
         msg += f"PDF URL: {pdf_data.get('pdf_url') if pdf_data else '_Not applicable_'}\n"
@@ -373,16 +397,19 @@ def parse_and_notify(url, sent_posts):
         new_posts.append((post_id, msg))
 
     if not new_posts:
-        logger.info(f"No new relevant posts found on {url} for current month")
+        logger.info(f"No new relevant posts found on {url} for current week")
         return
 
     for post_id, message in new_posts:
-        if send_telegram(message):
-            save_sent_post(post_id)
-            sent_posts.add(post_id)
-            logger.info(f"Sent notification for: {post_id}")
-        else:
-            logger.error(f"Failed to send notification for: {post_id}")
+        try:
+            if send_telegram(message):
+                save_sent_post(post_id)
+                sent_posts.add(post_id)
+                logger.info(f"Sent and saved notification for: {post_id}")
+            else:
+                logger.error(f"Failed to send notification for: {post_id}")
+        except Exception as e:
+            logger.error(f"Error processing notification for {post_id}: {e}")
 
 def main():
     """Main function to start website monitoring."""
