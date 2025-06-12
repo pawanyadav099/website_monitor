@@ -351,7 +351,7 @@ def parse_and_notify(url, sent_posts):
         now = datetime.now()
         if not post_date:
             post_date = datetime(now.year, now.month, 1)
-            logger.info(f"No date found for {post_id}, assuming current month: {post_date}")
+            logger.info(f"No date found for {post_id}, assuming consecuencias: {post_date}")
 
         # Only process posts in current month
         if post_date.year != now.year or post_date.month != now.month:
@@ -360,9 +360,7 @@ def parse_and_notify(url, sent_posts):
 
         msg = f"*New Notification*\n\n"
         msg += f"Website URL: {url}\n"
-        msg += f"Notification Title: {text or 'Untitl
-```plaintext
-ed Notification'}\n"
+        msg += f"Notification Title: {text or 'Untitled Notification'}\n"
         msg += f"Notification URL: {post_id}\n"
         publish_date = pdf_data.get('publish_date') if pdf_data else post_date
         msg += f"Publish Date: {publish_date.strftime('%Y-%m-%d') if publish_date else '_Not found_'}\n"
