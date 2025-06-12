@@ -10,7 +10,6 @@ on:
 jobs:
   scrape-and-notify:
     runs-on: ubuntu-latest
-
     steps:
       # Checkout the repository
       - name: Checkout code
@@ -30,17 +29,18 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            echo "requirements.txt not found"
-            exit 1
+            echo "requirements.txt not found, installing required packages directly"
+            pip install requests httpx beautifulsoup4 urllib3 python-dotenv PyPDF2 pdfplumber python-dateutil
           fi
 
-      # Optional: Clear sent_posts.txt to avoid stale data (commented out to persist data)
-      # - name: Clear sent_posts.txt
-      #   run: |
-      #     if [ -f sent_posts.txt ]; then
-      #       rm sent_posts.txt
-      #       echo "Cleared sent_posts.txt"
-      #     fi
+      # Debug environment variables
+      - name: Debug environment variables
+        run: |
+          echo "TOKEN is set: ${TOKEN:+set}"
+          echo "CHAT_ID is set: ${CHAT_ID:+set}"
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       # Run the scraper script
       - name: Run monitor script
@@ -49,6 +49,18 @@ jobs:
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python a.py
+
+      # Commit and push sent_posts.txt
+      - name: Commit and push sent_posts.txt
+        if: always()  # Run even if the script fails
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add sent_posts.txt
+          git commit -m "Update sent_posts.txt" || echo "No changes to commit"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # Upload sent_posts.txt as an artifact for debugging
       - name: Upload sent_posts.txt
