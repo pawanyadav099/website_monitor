@@ -32,16 +32,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load environment variables
+# Note: load_dotenv() is optional since GitHub Actions sets variables directly
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Validate environment variables
+# Validate environment variables with detailed debugging
 if not TOKEN or not CHAT_ID:
     logger.error("Missing Telegram TOKEN or CHAT_ID in environment variables")
     logger.error(f"TOKEN is {'set' if TOKEN else 'not set'}")
     logger.error(f"CHAT_ID is {'set' if CHAT_ID else 'not set'}")
+    logger.error("Available environment variables: %s", list(os.environ.keys()))
     exit(1)
+else:
+    logger.info("Successfully loaded TOKEN and CHAT_ID")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -351,7 +355,7 @@ def parse_and_notify(url, sent_posts):
         now = datetime.now()
         if not post_date:
             post_date = datetime(now.year, now.month, 1)
-            logger.info(f"No date found for {post_id}, assuming consecuencias: {post_date}")
+            logger.info(f"No date found for {post_id}, assuming current month: {post_date}")
 
         # Only process posts in current month
         if post_date.year != now.year or post_date.month != now.month:
