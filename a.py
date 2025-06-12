@@ -38,7 +38,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 # Validate environment variables
 if not TOKEN or not CHAT_ID:
-    logger.error("Missing Telegram TOKEN or CHAT_ID in .env file")
+    logger.error("Missing Telegram TOKEN or CHAT_ID in environment variables")
+    logger.error(f"TOKEN is {'set' if TOKEN else 'not set'}")
+    logger.error(f"CHAT_ID is {'set' if CHAT_ID else 'not set'}")
     exit(1)
 
 HEADERS = {
@@ -86,7 +88,7 @@ def save_sent_post(post_id):
 def send_telegram(message):
     """Send a message to Telegram with retry logic."""
     if not TOKEN or not CHAT_ID:
-        logger.error("Telegram TOKEN or CHAT_ID missing")
+        logger.error("Telegram TOKEN or CHAT_ID missing during send attempt")
         return False
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {
@@ -358,7 +360,9 @@ def parse_and_notify(url, sent_posts):
 
         msg = f"*New Notification*\n\n"
         msg += f"Website URL: {url}\n"
-        msg += f"Notification Title: {text or 'Untitled Notification'}\n"
+        msg += f"Notification Title: {text or 'Untitl
+```plaintext
+ed Notification'}\n"
         msg += f"Notification URL: {post_id}\n"
         publish_date = pdf_data.get('publish_date') if pdf_data else post_date
         msg += f"Publish Date: {publish_date.strftime('%Y-%m-%d') if publish_date else '_Not found_'}\n"
