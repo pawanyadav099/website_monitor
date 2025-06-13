@@ -1,143 +1,100 @@
-import requests
+import asyncio
+import configparser
+import logging
+import sqlite3
+import os
+import re
+import time
+from datetime import datetime, timedelta
+from io import BytesIO
+from urllib.parse import urljoin, urlparse
+from typing import List, Set, Optional, Tuple
+
 import httpx
 from bs4 import BeautifulSoup
-import urllib3
-import os
-from datetime import datetime, timedelta
+from charset_normalizer import detect
 from dateutil.parser import parse as date_parse
-from io import BytesIO
-import re
-import PyPDF2
-import pdfplumber
-from urllib.parse import urljoin, urlparse
 from dotenv import load_dotenv
-import logging
-import time
-try:
-    import fcntl
-except ImportError:
-    fcntl = None  # For Windows compatibility
-
+from filelock import FileLock
+import pdfplumber
+import structlog
 from url import URLS  # List of URLs to monitor
 
-# Disable SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('website_monitor.log'),
-        logging.StreamHandler()
-    ]
+# Configure structured logging
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.add_log_level,
+        structlog.processors.JSONRenderer()
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
 )
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger()
+
+# Load configuration
+config = configparser.ConfigParser()
+config.read('config.ini')
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# Configuration defaults
+TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=15))
+PDF_TIMEOUT = int(config.get('DEFAULT', 'pdf_timeout', fallback=20))
+HEADERS = {
+    "User-Agent": config.get('DEFAULT', 'user_agent', fallback="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+}
+KEYWORDS = config.get('DEFAULT', 'keywords', fallback="job,result,notification,admit card,notice,exam,interview,vacancy,recruitment,call letter,merit list,schedule,announcement,bulletin").split(',')
+SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_posts.db")
+LOCK_FILE = config.get('DEFAULT', 'lock_file', fallback="website_monitor.lock")
+TELEGRAM_RATE_LIMIT = float(config.get('DEFAULT', 'telegram_rate_limit', fallback=0.1))  # Seconds between messages
+
 # Validate environment variables
 if not TOKEN or not CHAT_ID:
-    logger.error("Missing Telegram TOKEN or CHAT_ID in environment variables")
-    logger.error(f"TOKEN is {'set' if TOKEN else 'not set'}")
-    logger.error(f"CHAT_ID is {'set' if CHAT_ID else 'not set'}")
-    logger.error("Available environment variables: %s", list(os.environ.keys()))
-    if os.path.exists('.env'):
-        with open('.env', 'r') as f:
-            logger.error("Content of .env file: %s", f.read())
-    else:
-        logger.error(".env file not found")
+    logger.error("Missing Telegram TOKEN or CHAT_ID", token_set=bool(TOKEN), chat_id_set=bool(CHAT_ID))
     exit(1)
 else:
     logger.info("Successfully loaded TOKEN and CHAT_ID")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-}
+def init_db():
+    """Initialize SQLite database for sent posts."""
+    with sqlite3.connect(SENT_POSTS_DB) as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS sent_posts (post_id TEXT PRIMARY KEY, saved_at TIMESTAMP)')
+        conn.commit()
+    logger.info("Initialized SQLite database", db_file=SENT_POSTS_DB)
 
-SENT_POSTS_FILE = "sent_posts.txt"
-LOCK_FILE = "website_monitor.lock"
-
-KEYWORDS = [
-    "job", "result", "notification", "admit card", "notice", "exam",
-    "interview", "vacancy", "recruitment", "call letter", "merit list",
-    "schedule", "announcement", "bulletin"
-]
-
-def acquire_lock():
-    """Acquire a file-based lock to prevent concurrent runs."""
-    if not fcntl:
-        logger.warning("fcntl not available, skipping lock (Windows environment?)")
-        return None
-    lock_file = open(LOCK_FILE, 'w')
+def load_sent_posts() -> Set[str]:
+    """Load previously sent post IDs from SQLite."""
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        logger.info("Acquired lock")
-        return lock_file
-    except IOError:
-        logger.warning("Another instance is running, exiting")
-        lock_file.close()
-        exit(1)
-
-def release_lock(lock_file):
-    """Release the file-based lock."""
-    if not lock_file:
-        return
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    lock_file.close()
-    if os.path.exists(LOCK_FILE):
-        os.remove(LOCK_FILE)
-    logger.info("Released lock")
-
-def contains_keyword(text):
-    """Check if text contains any predefined keywords."""
-    if not text:
-        return False
-    text_lower = text.lower()
-    return any(keyword in text_lower for keyword in KEYWORDS)
-
-def load_sent_posts():
-    """Load previously sent post IDs from file."""
-    sent_posts = set()
-    if not os.path.exists(SENT_POSTS_FILE):
-        logger.info(f"{SENT_POSTS_FILE} not found, starting fresh")
-        return sent_posts
-    try:
-        with open(SENT_POSTS_FILE, "r", encoding="utf-8") as f:
-            sent_posts = set(line.strip().lower() for line in f if line.strip())
-        logger.info(f"Loaded {len(sent_posts)} sent posts: {sent_posts}")
+        with sqlite3.connect(SENT_POSTS_DB) as conn:
+            cursor = conn.execute('SELECT post_id FROM sent_posts')
+            sent_posts = {row[0] for row in cursor.fetchall()}
+        logger.info("Loaded sent posts", count=len(sent_posts))
         return sent_posts
     except Exception as e:
-        logger.error(f"Error reading {SENT_POSTS_FILE}: {e}")
+        logger.error("Error loading sent posts", error=str(e))
         return set()
 
-def save_sent_post(post_id):
-    """Save a post ID to the sent posts file."""
+def save_sent_post(post_id: str):
+    """Save a post ID to SQLite."""
     try:
-        # Check write permissions
-        if os.path.exists(SENT_POSTS_FILE) and not os.access(SENT_POSTS_FILE, os.W_OK):
-            logger.error(f"No write permission for {SENT_POSTS_FILE}")
-            return
-        with open(SENT_POSTS_FILE, "a", encoding="utf-8") as f:
-            f.write(post_id.lower() + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        logger.info(f"Saved post ID: {post_id}")
-        # Verify save
-        with open(SENT_POSTS_FILE, "r", encoding="utf-8") as f:
-            content = f.read().lower()
-            if post_id.lower() not in content:
-                logger.error(f"Failed to verify save of post ID: {post_id}")
+        with sqlite3.connect(SENT_POSTS_DB) as conn:
+            conn.execute('INSERT OR IGNORE INTO sent_posts (post_id, saved_at) VALUES (?, ?)',
+                         (post_id.lower(), datetime.now()))
+            conn.commit()
+        logger.info("Saved post ID", post_id=post_id)
     except Exception as e:
-        logger.error(f"Error saving post {post_id} to {SENT_POSTS_FILE}: {e}")
+        logger.error("Error saving post ID", post_id=post_id, error=str(e))
 
-def send_telegram(message):
-    """Send a message to Telegram with retry logic."""
+async def send_telegram(message: str, client: httpx.AsyncClient) -> bool:
+    """Send a message to Telegram with rate-limiting."""
     if not TOKEN or not CHAT_ID:
-        logger.error("Telegram TOKEN or CHAT_ID missing during send attempt")
+        logger.error("Telegram TOKEN or CHAT_ID missing")
         return False
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {
@@ -148,42 +105,33 @@ def send_telegram(message):
     }
     for attempt in range(3):
         try:
-            r = requests.post(url, data=data, timeout=15)
-            r.raise_for_status()
-            logger.info("Telegram message sent successfully")
-            time.sleep(2)
+            resp = await client.post(url, json=data, timeout=TIMEOUT)
+            resp.raise_for_status()
+            logger.info("Telegram message sent", message=message[:50])
+            await asyncio.sleep(TELEGRAM_RATE_LIMIT)
             return True
-        except requests.RequestException as e:
-            logger.warning(f"Telegram send attempt {attempt + 1} failed: {e}")
-            time.sleep(2 ** attempt)
-    logger.error("Failed to send Telegram message after retries")
+        except httpx.RequestException as e:
+            logger.warning("Telegram send failed", attempt=attempt + 1, error=str(e))
+            await asyncio.sleep(2 ** attempt)
+    logger.error("Failed to send Telegram message after retries", message=message[:50])
     return False
 
-def fetch(url):
-    """Fetch HTML content from a URL with fallback to httpx."""
+async def fetch(url: str, client: httpx.AsyncClient) -> Optional[str]:
+    """Fetch HTML content asynchronously with encoding detection."""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
+        resp = await client.get(url, headers=HEADERS)
         resp.raise_for_status()
-        logger.info(f"Fetched {url} successfully (status: {resp.status_code})")
-        time.sleep(2)
-        return resp.text
-    except requests.exceptions.SSLError as ssl_err:
-        logger.warning(f"SSL Error for {url}: {ssl_err}. Trying httpx...")
-        try:
-            with httpx.Client(verify=False, timeout=15) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-                logger.info(f"Fetched {url} successfully with httpx (status: {resp.status_code})")
-                time.sleep(2)
-                return resp.text
-        except Exception as e:
-            logger.error(f"Error fetching {url} with httpx: {e}")
-            return None
+        detected = detect(resp.content)
+        encoding = detected['encoding'] or 'utf-8'
+        text = resp.content.decode(encoding)
+        logger.info("Fetched URL", url=url, status=resp.status_code)
+        await asyncio.sleep(2)
+        return text
     except Exception as e:
-        logger.error(f"Error fetching {url}: {e}")
+        logger.error("Error fetching URL", url=url, error=str(e))
         return None
 
-def extract_date_from_text(text):
+def extract_date_from_text(text: str) -> Optional[datetime]:
     """Extract a date from text using various date patterns."""
     if not text:
         return None
@@ -200,61 +148,38 @@ def extract_date_from_text(text):
             try:
                 dt = date_parse(match.group(1), dayfirst=True)
                 if 2000 <= dt.year <= datetime.now().year + 1:
-                    logger.debug(f"Extracted date {dt} from text: {text}")
+                    logger.debug("Extracted date", date=dt, text=text[:50])
                     return dt
             except ValueError:
                 continue
     try:
         dt = date_parse(text, fuzzy=True, dayfirst=True)
         if 2000 <= dt.year <= datetime.now().year + 1:
-            logger.debug(f"Extracted fuzzy date {dt} from text: {text}")
+            logger.debug("Extracted fuzzy date", date=dt, text=text[:50])
             return dt
     except ValueError:
         pass
     return None
 
-def extract_date_from_pdf(url):
-    """Extract a date from a PDF file by parsing its text content."""
+async def extract_date_from_pdf(url: str, client: httpx.AsyncClient) -> Optional[datetime]:
+    """Extract a date from the first few pages of a PDF."""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20, verify=False)
-        r.raise_for_status()
-        pdf_file = BytesIO(r.content)
-        try:
-            reader = PyPDF2.PdfReader(pdf_file)
-            full_text = ""
-            for page in reader.pages:
-                try:
-                    page_text = page.extract_text()
-                    if page_text:
-                        full_text += page_text + "\n"
-                except Exception:
-                    continue
-            if not full_text:
-                with pdfplumber.open(pdf_file) as pdf:
-                    for page in pdf.pages:
-                        try:
-                            page_text = page.extract_text()
-                            if page_text:
-                                full_text += page_text + "\n"
-                        except Exception:
-                            continue
-            lines = full_text.splitlines()
-            date_candidates = []
-            for line in lines:
-                dt = extract_date_from_text(line)
-                if dt:
-                    date_candidates.append(dt)
-            post_date = min(date_candidates) if date_candidates else None
-            logger.info(f"Extracted PDF date: {post_date} from {url}")
-            return post_date
-        except Exception as e:
-            logger.error(f"Error parsing PDF {url}: {e}")
-            return None
-    except requests.RequestException as e:
-        logger.error(f"Error fetching PDF {url}: {e}")
+        resp = await client.get(url, headers=HEADERS, timeout=PDF_TIMEOUT)
+        resp.raise_for_status()
+        with pdfplumber.open(BytesIO(resp.content)) as pdf:
+            for page in pdf.pages[:3]:  # Limit to first 3 pages
+                text = page.extract_text()
+                if text:
+                    dt = extract_date_from_text(text)
+                    if dt:
+                        logger.info("Extracted PDF date", date=dt, url=url)
+                        return dt
+        return None
+    except Exception as e:
+        logger.error("Error processing PDF", url=url, error=str(e))
         return None
 
-def extract_date(a_tag):
+def extract_date(a_tag: BeautifulSoup) -> Optional[datetime]:
     """Extract a date from an <a> tag's attributes or surrounding text."""
     candidates = []
     if a_tag.get('title'):
@@ -269,15 +194,15 @@ def extract_date(a_tag):
     for text in candidates:
         dt = extract_date_from_text(text)
         if dt:
-            logger.debug(f"Extracted date {dt} from <a> tag: {text}")
+            logger.debug("Extracted date from <a> tag", date=dt, text=text[:50])
             return dt
     return None
 
-def extract_date_from_url(url):
+def extract_date_from_url(url: str) -> Optional[datetime]:
     """Extract a date from a URL using common date patterns."""
     patterns = [
-        r'/(\d{4})[/-](\d{1,2})[/-]?(\d{1,2})?',  # /2025/06 or /2025/06/12
-        r'date=(\d{4})-(\d{2})-(\d{2})',           # ?date=2025-06-12
+        r'/(\d{4})[/-](\d{1,2})[/-]?(\d{1,2})?',
+        r'date=(\d{4})-(\d{2})-(\d{2})',
     ]
     for pattern in patterns:
         match = re.search(pattern, url, re.I)
@@ -288,13 +213,13 @@ def extract_date_from_url(url):
                 day = 1 if len(match.groups()) < 3 else int(match.group(3))
                 if 2000 <= year <= datetime.now().year + 1 and 1 <= month <= 12:
                     dt = datetime(year, month, day)
-                    logger.debug(f"Extracted date {dt} from URL: {url}")
+                    logger.debug("Extracted date from URL", date=dt, url=url)
                     return dt
             except ValueError:
                 continue
     return None
 
-def normalize_url(url, base_url):
+def normalize_url(url: str, base_url: str) -> str:
     """Normalize a URL by resolving relative paths and removing fragments."""
     try:
         full_url = urljoin(base_url, url)
@@ -304,27 +229,27 @@ def normalize_url(url, base_url):
             clean_url += f"?{parsed.query}"
         return clean_url.lower()
     except Exception as e:
-        logger.error(f"Error normalizing URL {url}: {e}")
+        logger.error("Error normalizing URL", url=url, error=str(e))
         return url.lower()
 
-def is_post_link(href, base_url):
+def is_post_link(href: str, base_url: str) -> bool:
     """Check if a link is a relevant PDF link containing keywords."""
     if not href:
         return False
     full_url = normalize_url(href, base_url)
     if not full_url.lower().endswith('.pdf'):
         return False
-    if contains_keyword(full_url) or contains_keyword(href):
-        logger.debug(f"Relevant PDF link found: {full_url}")
+    if any(keyword in full_url.lower() for keyword in KEYWORDS) or any(keyword in href.lower() for keyword in KEYWORDS):
+        logger.debug("Relevant PDF link found", url=full_url)
         return True
     return False
 
-def parse_and_notify(url, sent_posts):
+async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncClient) -> List[Tuple[str, str]]:
     """Parse HTML content and notify about new PDF posts."""
-    logger.info(f"Processing URL: {url}")
-    html = fetch(url)
+    logger.info("Processing URL", url=url)
+    html = await fetch(url, client)
     if not html:
-        logger.error(f"No data fetched for {url}")
+        logger.error("No data fetched", url=url)
         return []
 
     soup = BeautifulSoup(html, 'html.parser', from_encoding="utf-8")
@@ -337,44 +262,44 @@ def parse_and_notify(url, sent_posts):
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = end_of_week.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    logger.info(f"Filtering posts for week: {start_of_week.strftime('%Y-%m-%d')} to {end_of_week.strftime('%Y-%m-%d')}")
+    logger.info("Filtering posts for week", start=start_of_week, end=end_of_week)
 
     for a in soup.find_all('a', href=True):
         text = a.get_text(strip=True)
         href = a['href']
 
         if not text or not href:
-            logger.debug(f"Skipping empty link: {href}")
+            logger.debug("Skipping empty link", href=href)
             continue
 
         if not is_post_link(href, url):
-            logger.debug(f"Skipping non-relevant link: {text} ({href})")
+            logger.debug("Skipping non-relevant link", text=text, href=href)
             continue
 
         post_id = normalize_url(href, url)
-        logger.debug(f"Processing post: {href} -> Resolved to: {post_id}")
+        logger.debug("Processing post", href=href, post_id=post_id)
 
         if post_id in sent_posts:
-            logger.info(f"Skipping already sent post: {post_id}")
+            logger.info("Skipping already sent post", post_id=post_id)
             continue
 
         post_date = extract_date(a)
         is_pdf = post_id.lower().endswith('.pdf')
         if is_pdf and not post_date:
-            post_date = extract_date_from_pdf(post_id)
+            post_date = await extract_date_from_pdf(post_id, client)
         if not post_date:
             post_date = extract_date_from_url(post_id)
 
         if not post_date:
-            logger.info(f"No date found for {post_id}, skipping post")
+            logger.info("No date found, skipping post", post_id=post_id)
             continue
 
         if post_date < start_of_week:
-            logger.info(f"Stopping at old post {post_id}: Date {post_date.strftime('%Y-%m-%d')} before current week")
+            logger.info("Stopping at old post", post_id=post_id, date=post_date)
             break
 
         if not (start_of_week <= post_date <= end_of_week):
-            logger.info(f"Skipping post {post_id}: Date {post_date.strftime('%Y-%m-%d')} not in current week")
+            logger.info("Skipping post not in current week", post_id=post_id, date=post_date)
             continue
 
         msg = f"*New Notification*\n\n"
@@ -387,44 +312,69 @@ def parse_and_notify(url, sent_posts):
         new_posts.append((post_id, msg))
         notifications.append({"title": text, "url": post_id, "date": post_date})
 
-    # Send summary notification only for new posts
+    # Send summary notification for new posts
     if new_posts:
         unique_notifications = set(f"{n['title']}:{n['url']}" for n in notifications)
         if len(unique_notifications) == 1:
-            logger.info(f"All {len(notifications)} notifications are identical: {notifications[0]['title']}")
-            send_telegram(f"All notifications for {url} this week are identical:\n\nTitle: {notifications[0]['title']}\nURL: {notifications[0]['url']}\nDate: {notifications[0]['date'].strftime('%Y-%m-%d')}\n")
+            n = notifications[0]
+            await send_telegram(
+                f"All notifications for {url} this week are identical:\n\nTitle: {n['title']}\nURL: {n['url']}\nDate: {n['date'].strftime('%Y-%m-%d')}\n",
+                client
+            )
         else:
             latest = max(notifications, key=lambda x: x['date'])
-            logger.info(f"Found {len(notifications)} notifications, latest: {latest['title']} on {latest['date'].strftime('%Y-%m-%d')}")
-            send_telegram(f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {latest['date'].strftime('%Y-%m-%d')}\n")
+            await send_telegram(
+                f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {latest['date'].strftime('%Y-%m-%d')}\n",
+                client
+            )
 
     return new_posts
 
-def main():
+async def main(urls: List[str] = URLS):
     """Main function to monitor URLs and send notifications."""
-    lock_file = acquire_lock()
+    init_db()
+    lock = FileLock(LOCK_FILE)
     try:
-        logger.info("Monitoring started...")
-        sent_posts = load_sent_posts()
-        for url in URLS:
-            try:
-                new_posts = parse_and_notify(url, sent_posts)
-                if not new_posts:
-                    logger.info(f"No new relevant PDFs found for {url}")
-                    continue
-                for post_id, message in new_posts:
-                    if send_telegram(message):
-                        save_sent_post(post_id)
-                        sent_posts.add(post_id)
-                        logger.info(f"Sent and saved notification for: {post_id}")
-                    else:
-                        logger.error(f"Failed to send notification for: {post_id}")
-            except Exception as e:
-                logger.error(f"Error processing {url}: {e}")
-                continue
-            time.sleep(2)
+        with lock.acquire(timeout=1):
+            logger.info("Monitoring started")
+            sent_posts = load_sent_posts()
+            async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as client:
+                for url in urls:
+                    try:
+                        if not url:
+                            logger.error("Invalid URL, skipping", url=url)
+                            continue
+                        new_posts = await parse_and_notify(url, sent_posts, client)
+                        if not new_posts:
+                            logger.info("No new relevant PDFs found", url=url)
+                            continue
+                        for post_id, message in new_posts:
+                            if await send_telegram(message, client):
+                                save_sent_post(post_id)
+                                sent_posts.add(post_id)
+                                logger.info("Sent and saved notification", post_id=post_id)
+                            else:
+                                logger.error("Failed to send notification", post_id=post_id)
+                    except Exception as e:
+                        logger.error("Error processing URL", url=url, error=str(e))
+                        await send_telegram(f"Error processing {url}: {str(e)}", client)
+                    await asyncio.sleep(2)
+    except Exception as e:
+        logger.error("Script failed", error=str(e))
+        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as client:
+            await send_telegram(f"Script failed: {str(e)}", client)
+        raise
     finally:
-        release_lock(lock_file)
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+            logger.info("Cleaned up lock file")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Website Monitor")
+    parser.add_argument('--urls', nargs='+', default=URLS, help="URLs to monitor")
+    parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help="Logging level")
+    args = parser.parse_args()
+
+    logging.getLogger().setLevel(args.log_level)
+    asyncio.run(main(args.urls))
