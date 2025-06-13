@@ -1,4 +1,3 @@
-import asyncio
 import configparser
 import logging
 import sqlite3
@@ -10,6 +9,7 @@ from io import BytesIO
 from urllib.parse import urljoin, urlparse
 from typing import List, Set, Optional, Tuple
 
+import requests
 import httpx
 from bs4 import BeautifulSoup
 from charset_normalizer import detect
@@ -17,6 +17,7 @@ from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 from filelock import FileLock
 import pdfplumber
+import PyPDF2
 import structlog
 from url import URLS  # List of URLs to monitor
 
@@ -116,19 +117,40 @@ async def send_telegram(message: str, client: httpx.AsyncClient) -> bool:
     logger.error("Failed to send Telegram message after retries", message=message[:50])
     return False
 
-async def fetch(url: str, client: httpx.AsyncClient) -> Optional[str]:
-    """Fetch HTML content asynchronously with encoding detection."""
+async def fetch(url: str, client: httpx.AsyncClient, is_binary: bool = False) -> Optional[Union[str, bytes]]:
+    """Fetch content asynchronously, returning text for HTML or bytes for binary (e.g., PDFs)."""
     try:
-        resp = await client.get(url, headers=HEADERS)
+        resp = await client.get(url, headers=HEADERS, timeout=PDF_TIMEOUT if is_binary else TIMEOUT)
+        resp.raise_for_status()
+        if is_binary:
+            logger.info("Fetched binary content", url=url, status=resp.status_code)
+            return resp.content
+        detected = detect(resp.content)
+        encoding = detected['encoding'] or 'utf-8'
+        text = resp.content.decode(encoding, errors='ignore')
+        logger.info("Fetched text content", url=url, status=resp.status_code)
+        await asyncio.sleep(2)
+        return text
+    except httpx.HTTPStatusError as e:
+        logger.error("HTTP error fetching URL", url=url, status=e.response.status_code, error=str(e))
+        return None
+    except Exception as e:
+        logger.error("Error fetching URL", url=url, error=str(e))
+        return None
+
+def fetch_sync(url: str) -> Optional[str]:
+    """Fetch HTML content synchronously using requests."""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         resp.raise_for_status()
         detected = detect(resp.content)
         encoding = detected['encoding'] or 'utf-8'
-        text = resp.content.decode(encoding)
-        logger.info("Fetched URL", url=url, status=resp.status_code)
-        await asyncio.sleep(2)
+        text = resp.content.decode(encoding, errors='ignore')
+        logger.info("Fetched URL synchronously", url=url, status=resp.status_code)
+        time.sleep(2)
         return text
-    except Exception as e:
-        logger.error("Error fetching URL", url=url, error=str(e))
+    except requests.RequestException as e:
+        logger.error("Error fetching URL synchronously", url=url, error=str(e))
         return None
 
 def extract_date_from_text(text: str) -> Optional[datetime]:
@@ -162,24 +184,40 @@ def extract_date_from_text(text: str) -> Optional[datetime]:
     return None
 
 async def extract_date_from_pdf(url: str, client: httpx.AsyncClient) -> Optional[datetime]:
-    """Extract a date from the first few pages of a PDF."""
+    """Extract a date from the first few pages of a PDF using pdfplumber and PyPDF2."""
     try:
-        resp = await client.get(url, headers=HEADERS, timeout=PDF_TIMEOUT)
-        resp.raise_for_status()
-        with pdfplumber.open(BytesIO(resp.content)) as pdf:
-            for page in pdf.pages[:3]:
-                text = page.extract_text()
-                if text:
+        content = await fetch(url, client, is_binary=True)
+        if not content:
+            return None
+        pdf_content = BytesIO(content)
+
+        # Try pdfplumber first
+        try:
+            with pdfplumber.open(pdf_content) as pdf:
+                for page in pdf.pages[:3]:
+                    text = page.extract_text() or ""
                     dt = extract_date_from_text(text)
                     if dt:
-                        logger.info("Extracted PDF date", date=dt, url=url)
+                        logger.info("Extracted PDF date with pdfplumber", date=dt, url=url)
                         return dt
+        except Exception as e:
+            logger.warning("pdfplumber failed, trying PyPDF2", url=url, error=str(e))
+
+        # Fallback to PyPDF2
+        pdf_content.seek(0)
+        pdf_reader = PyPDF2.PdfReader(pdf_content)
+        for page_num in range(min(3, len(pdf_reader.pages))):
+            text = pdf_reader.pages[page_num].extract_text() or ""
+            dt = extract_date_from_text(text)
+            if dt:
+                logger.info("Extracted PDF date with PyPDF2", date=dt, url=url)
+                return dt
         return None
     except Exception as e:
         logger.error("Error processing PDF", url=url, error=str(e))
         return None
 
-def extract_date(a_tag: BeautifulSoup, notification_url: str, client: httpx.AsyncClient) -> Optional[datetime]:
+async def extract_date(a_tag: BeautifulSoup, notification_url: str, client: httpx.AsyncClient) -> Optional[datetime]:
     """Extract a date from an <a> tag, surrounding text, or linked page."""
     candidates = []
     if a_tag.get('title'):
@@ -194,9 +232,9 @@ def extract_date(a_tag: BeautifulSoup, notification_url: str, client: httpx.Asyn
 
     # Fetch linked page for additional date context
     try:
-        linked_html = asyncio.run(fetch(notification_url, client))
+        linked_html = await fetch(notification_url, client)
         if linked_html:
-            linked_soup = BeautifulSoup(linked_html, 'html.parser', from_encoding="utf-8")
+            linked_soup = BeautifulSoup(linked_html, 'html.parser')
             meta_date = linked_soup.find('meta', attrs={'name': re.compile('date|publish', re.I)})
             if meta_date and meta_date.get('content'):
                 candidates.append(meta_date.get('content'))
@@ -261,7 +299,7 @@ async def find_pdf_in_notification_page(notification_url: str, client: httpx.Asy
         html = await fetch(notification_url, client)
         if not html:
             return None
-        soup = BeautifulSoup(html, 'html.parser', from_encoding="utf-8")
+        soup = BeautifulSoup(html, 'html.parser')
         for a in soup.find_all('a', href=True):
             href = a['href']
             if href.lower().endswith('.pdf'):
@@ -276,13 +314,14 @@ async def find_pdf_in_notification_page(notification_url: str, client: httpx.Asy
 async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncClient) -> List[Tuple[str, str]]:
     """Parse HTML content and notify about new notifications."""
     logger.info("Processing URL", url=url)
-    html = await fetch(url, client)
+    html = fetch_sync(url)
     if not html:
         logger.error("No data fetched", url=url)
-        await send_telegram(f"Error: Failed to fetch {url}", client)
+        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
+            await send_telegram(f"Error: Failed to fetch {url}", temp_client)
         return []
 
-    soup = BeautifulSoup(html, 'html.parser', from_encoding="utf-8")
+    soup = BeautifulSoup(html, 'html.parser')
     new_posts = []
     notifications = []
     latest_no_date = None
@@ -320,14 +359,14 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
         try:
             linked_html = await fetch(post_id, client)
             if linked_html:
-                linked_soup = BeautifulSoup(linked_html, 'html.parser', from_encoding="utf-8")
+                linked_soup = BeautifulSoup(linked_html, 'html.parser')
                 main_content = linked_soup.find('div', class_=['content', 'main', 'article', 'post']) or linked_soup
                 full_text = main_content.get_text(strip=True)[:2000] if main_content else full_text
         except Exception as e:
             logger.warning("Failed to fetch full text from notification page", post_id=post_id, error=str(e))
 
         # Extract date
-        post_date = extract_date(a, post_id, client)
+        post_date = await extract_date(a, post_id, client)
         is_pdf = post_id.lower().endswith('.pdf')
         if is_pdf and not post_date:
             post_date = await extract_date_from_pdf(post_id, client)
@@ -399,7 +438,8 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
 
     if not notifications:
         logger.warning("No notifications found", url=url)
-        await send_telegram(f"Warning: No notifications found on {url} for the current week", client)
+        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
+            await send_telegram(f"Warning: No notifications found on {url} for the current week", temp_client)
 
     # Send summary notification
     if notifications:
@@ -446,15 +486,17 @@ async def main(urls: List[str] = URLS):
                                 logger.error("Failed to send notification", post_id=post_id)
                     except Exception as e:
                         logger.error("Error processing URL", url=url, error=str(e))
-                        await send_telegram(f"Error processing {url}: {str(e)}", client)
+                        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
+                            await send_telegram(f"Error processing {url}: {str(e)}", temp_client)
                     await asyncio.sleep(2)
                 if not any_notifications_found:
-                    await send_telegram("No notifications found across all URLs for the current week", client)
+                    async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
+                        await send_telegram("No notifications found across all URLs for the current week", temp_client)
                     logger.info("No notifications found for any URL")
     except Exception as e:
         logger.error("Script failed", error=str(e))
-        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as client:
-            await send_telegram(f"Script failed: {str(e)}", client)
+        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
+            await send_telegram(f"Script failed: {str(e)}", temp_client)
         raise
     finally:
         if os.path.exists(LOCK_FILE):
