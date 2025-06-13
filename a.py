@@ -5,7 +5,7 @@ import os
 import re
 import time
 from datetime import datetime
-from typing import Optional, List, Tuple  # Added Tuple for parse_notifications
+from typing import Optional, List, Tuple
 import requests
 from bs4 import BeautifulSoup
 from charset_normalizer import detect
@@ -83,31 +83,37 @@ def save_sent_post(notification_id: str):
         logger.error("Failed to save notification ID", id=notification_id, error=str(e))
 
 def escape_markdown(text: str) -> str:
-    """Escape Markdown special characters for Telegram."""
+    """Escape Markdown special characters for Telegram, excluding URLs."""
     if not text:
         return ""
     characters = r'([*_[\]()~`>#+\-=|{}!.])'
     return re.sub(characters, r'\\\1', text)
 
-def send_telegram(message: str) -> bool:
-    """Send a message to Telegram."""
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+def send_telegram(message: str, url: str) -> bool:
+    """Send a message to Telegram with unescaped URL."""
+    telegram_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    # Escape message but not the URL
+    message_parts = message.split("Website: ")
+    if len(message_parts) == 2:
+        formatted_message = f"{message_parts[0]}Website: {url}\n{escape_markdown(message_parts[1].split('\n', 1)[1])}"
+    else:
+        formatted_message = escape_markdown(message)
     data = {
         "chat_id": CHAT_ID,
-        "text": escape_markdown(message)[:4096],  # Telegram's max message length
+        "text": formatted_message[:4096],  # Telegram's max message length
         "parse_mode": "Markdown"
     }
     for attempt in range(1, 4):
         try:
-            resp = requests.post(url, json=data, timeout=30)
+            resp = requests.post(telegram_url, json=data, timeout=30)
             resp.raise_for_status()
-            logger.info("Telegram message sent", message=message[:50])
+            logger.info("Telegram message sent", message=formatted_message[:50])
             time.sleep(1.0)  # Avoid rate limiting
             return True
         except requests.RequestException as e:
             logger.warning("Telegram send failed", attempt=attempt, error=str(e))
             time.sleep(2 ** attempt)
-    logger.error("Failed to send Telegram message after retries", message=message[:50])
+    logger.error("Failed to send Telegram message after retries", message=formatted_message[:50])
     return False
 
 def fetch_page(url: str) -> Optional[str]:
@@ -126,15 +132,19 @@ def fetch_page(url: str) -> Optional[str]:
         return None
 
 def extract_date_from_text(text: str) -> Optional[datetime]:
-    """Extract a date from a text string."""
+    """Extract a date from a text string with enhanced patterns."""
     if not text:
         return None
     date_patterns = [
         r'\b(\d{1,2}[-/\s]\d{1,2}[-/\s]\d{2,4})\b',  # DD-MM-YYYY or DD/MM/YYYY
         r'\b(\d{4}[-/\s]\d{1,2}[-/\s]\d{1,2})\b',  # YYYY-MM-DD or YYYY/MM/DD
-        r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',
-        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',
-        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',
+        r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',  # DD Month YYYY
+        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',  # DD(st/nd) Jan YYYY
+        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',  # DD-Jan-YYYY
+        r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',  # Month DD, YYYY
+        r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.,]?\s+\d{4}\b',  # DD Jan YYYY
+        r'\b(\d{4}/\d{2}/\d{2})\b',  # YYYY/MM/DD
+        r'\b(\d{2}/\d{2}/\d{4})\b',  # MM/DD/YYYY or DD/MM/YYYY
     ]
     for pattern in date_patterns:
         match = re.search(pattern, text, re.I)
@@ -167,7 +177,7 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
     logger.info("Processing URL", url=url)
     html = fetch_page(url)
     if not html:
-        send_telegram(f"Error: Failed to fetch {url}")
+        send_telegram(f"Error: Failed to fetch {url}", url)
         return []
 
     soup = BeautifulSoup(html, 'html.parser')
@@ -175,42 +185,47 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
     current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)  # June 1, 2025
     logger.info("Filtering notifications for current month", start=current_month_start)
 
-    # Check all elements for notifications
-    for element in soup.find_all(['p', 'div', 'li', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+    # Check specific elements for notifications
+    for element in soup.find_all(['li', 'p', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
         text = element.get_text(strip=True)
+        if not text or len(text) < 10:  # Skip empty or very short text
+            continue
         if not is_notification(text):
             continue
 
         # Generate a unique ID for the notification
-        notification_id = f"{url}:{text[:100]}".lower()
+        notification_id = f"{url}:{hash(text)}".lower()  # Use hash to ensure uniqueness
         if notification_id in sent_posts:
             logger.info("Skipping already sent notification", id=notification_id)
             continue
 
-        # Extract date from element or parent
+        # Extract date from element, parent, or siblings
         date = None
         candidates = [text]
         if element.parent:
             candidates.append(element.parent.get_text(strip=True))
+        for sibling in element.find_next_siblings(limit=3):
+            candidates.append(sibling.get_text(strip=True))
+        time_tag = element.find_previous('time') or element.find_next('time')
+        if time_tag:
+            candidates.append(time_tag.get_text(strip=True))
+            if time_tag.get('datetime'):
+                candidates.append(time_tag.get('datetime'))
         for candidate in candidates:
             dt = extract_date_from_text(candidate)
             if dt:
                 date = dt
                 break
 
-        # Filter for current month
+        # Only include notifications with a June 2025 date
         if date and date >= current_month_start:
             msg = f"*New Notification*\n\n"
             msg += f"Website: {url}\n"
             msg += f"Text: {text}\n"
             msg += f"Date: {date.strftime('%Y-%m-%d')}\n"
             notifications.append((notification_id, msg))
-        elif not date:
-            # Send notification if no date is found but it's likely new
-            msg = f"*New Notification*\n\n"
-            msg += f"Website: {url}\n"
-            msg += f"Text: {text}\n"
-            notifications.append((notification_id, msg))
+        else:
+            logger.debug("Skipping notification without June 2025 date", text=text[:50])
 
     logger.info("Found notifications", url=url, count=len(notifications))
     return notifications
@@ -232,7 +247,7 @@ def main(urls: List[str] = URLS):
         try:
             notifications = parse_notifications(url, sent_posts)
             for notification_id, message in notifications:
-                if send_telegram(message):
+                if send_telegram(message, url):
                     save_sent_post(notification_id)
                     sent_posts.add(notification_id)
                     logger.info("Sent notification", id=notification_id)
@@ -240,7 +255,7 @@ def main(urls: List[str] = URLS):
                     logger.error("Failed to send notification", id=notification_id)
         except Exception as e:
             logger.error("Error processing URL", url=url, error=str(e))
-            send_telegram(f"Error processing {url}: {str(e)}")
+            send_telegram(f"Error processing {url}: {str(e)}", url)
         time.sleep(2)
 
 if __name__ == "__main__":
