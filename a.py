@@ -13,9 +13,8 @@ from urllib.parse import urljoin, urlparse, urlencode, parse_qs
 from dotenv import load_dotenv
 import logging
 import time
-import uuid
 
-from url import URLS  # URL list
+from url import URLS  # List of URLs to monitor
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -64,14 +63,14 @@ KEYWORDS = [
 ]
 
 def contains_keyword(text):
-    """Check if text contains any of the predefined keywords."""
+    """Check if text contains any predefined keywords."""
     if not text:
         return False
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in KEYWORDS)
 
 def load_sent_posts():
-    """Load previously sent posts from file."""
+    """Load previously sent post IDs from file."""
     sent_posts = set()
     if not os.path.exists(SENT_POSTS_FILE):
         logger.info(f"{SENT_POSTS_FILE} not found, starting fresh")
@@ -86,7 +85,7 @@ def load_sent_posts():
         return set()
 
 def save_sent_post(post_id):
-    """Save a post ID to the sent posts file with immediate flush."""
+    """Save a post ID to the sent posts file."""
     try:
         with open(SENT_POSTS_FILE, "a", encoding="utf-8") as f:
             f.write(post_id + "\n")
@@ -138,14 +137,14 @@ def fetch(url):
                 time.sleep(2)
                 return resp.text
         except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
+            logger.error(f"Error fetching {url} with httpx: {e}")
             return None
     except Exception as e:
         logger.error(f"Error fetching {url}: {e}")
         return None
 
 def extract_date_from_text(text):
-    """Extract a date from a text string using various patterns."""
+    """Extract a date from text using various date patterns."""
     if not text:
         return None
     date_patterns = [
@@ -356,14 +355,14 @@ def parse_and_notify(url, sent_posts):
         notifications.append({"title": text, "url": post_id, "date": post_date})
 
     if notifications:
-        unique_notifications = set(f"{n['title']}: {n['url']}" for n in notifications)
+        unique_notifications = set(f"{n['title']}:{n['url']}" for n in notifications)
         if len(unique_notifications) == 1:
             logger.info(f"All {len(notifications)} notifications are identical: {notifications[0]['title']}")
-            send_telegram(f"All notifications for {url} this week are identical:\n\nTitle: {notifications[0]['title']}\nURL: {notifications[0]['url']}\nDate: {notifications[0]['date'].strftime('%Y-%m-%d')}}\n")
+            send_telegram(f"All notifications for {url} this week are identical:\n\nTitle: {notifications[0]['title']}\nURL: {notifications[0]['url']}\nDate: {notifications[0]['date'].strftime('%Y-%m-%d')}\n")
         else:
             latest = max(notifications, key=lambda x: x['date'])
-            logger.info(f"Found {len(notifications)} notifications, latest: {latest['title']} on {latest['date'].strftime('%Y-%m-%d')}}\n")
-            send_telegram(f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {latest['date'].strftime('%Y-%m-%d')}}\n")
+            logger.info(f"Found {len(notifications)} notifications, latest: {latest['title']} on {latest['date'].strftime('%Y-%m-%d')}")
+            send_telegram(f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {latest['date'].strftime('%Y-%m-%d')}\n")
 
     return new_posts
 
