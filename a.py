@@ -5,18 +5,11 @@ import os
 import re
 import time
 from datetime import datetime
-from io import BytesIO
-from urllib.parse import urljoin, urlparse
-from typing import List, Set, Optional, Tuple, Union
-
 import requests
-import httpx
 from bs4 import BeautifulSoup
 from charset_normalizer import detect
 from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
-import pdfplumber
-import PyPDF2
 import structlog
 from url import URLS  # List of URLs to monitor
 
@@ -44,159 +37,104 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Configuration defaults
-TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=30))
-PDF_TIMEOUT = int(config.get('DEFAULT', 'pdf_timeout', fallback=30))
+TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=60))
 HEADERS = {
     "User-Agent": config.get('DEFAULT', 'user_agent', fallback="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 }
-KEYWORDS = config.get('DEFAULT', 'keywords', fallback="job,result,notification,admit card,notice,exam,interview,vacancy,recruitment,call letter,merit list,schedule,announcement,bulletin").split(',')
-SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_posts.db")
-TELEGRAM_RATE_LIMIT = float(config.get('DEFAULT', 'telegram_rate_limit', fallback=0.5))
-
-# Blocklist of domains and keywords to skip
-BLOCKLIST_DOMAINS = [
-    'examinationservices.nic.in',
-    'testservices.nic.in',
-    'ntaresults.nic.in',
-    'twitter.com',
-    'x.com',
-]
-BLOCKLIST_KEYWORDS = ['login', 'auth', 'share', 'downloadadmitcard']
+KEYWORDS = config.get('DEFAULT', 'keywords', fallback="job,result,notification,admit card,notice,exam,interview,vacancy,recruitment,call letter,application,schedule").split(',')
+SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_messages.db")
 
 # Validate environment variables
 if not TOKEN or not CHAT_ID:
     logger.error("Missing Telegram TOKEN or CHAT_ID", token_set=bool(TOKEN), chat_id_set=bool(CHAT_ID))
     exit(1)
 else:
-    logger.info("Successfully loaded TOKEN and CHAT_ID", chat_id=CHAT_ID, token_prefix=TOKEN[:5] + "***")
+    logger.info("Telegram configured", chat_id=CHAT_ID, token_prefix=TOKEN[:5] + "***")
 
 def init_db():
-    """Initialize SQLite database for sent posts."""
+    """Initialize SQLite database for sent notifications."""
     with sqlite3.connect(SENT_POSTS_DB) as conn:
-        conn.execute('CREATE TABLE IF NOT EXISTS sent_posts (post_id TEXT PRIMARY KEY, saved_at TIMESTAMP)')
+        conn.execute('CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, sent_at TIMESTAMP)')
         conn.commit()
-    logger.info("Initialized SQLite database", db_file=SENT_POSTS_DB)
+    logger.info("Initialized SQLite DB", db_file=SENT_POSTS_DB)
 
-def load_sent_posts() -> Set[str]:
-    """Load previously sent post IDs from SQLite."""
+def load_sent_posts() -> set:
+    """Load sent notification IDs from SQLite."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
-            cursor = conn.execute('SELECT post_id FROM sent_posts')
-            sent_posts = {row[0] for row in cursor.fetchall()}
-        logger.info("Loaded sent posts", count=len(sent_posts))
-        return sent_posts
-    except Exception as e:
-        logger.error("Error loading sent posts", error=str(e))
+            cursor = conn.execute('SELECT id FROM notifications')
+            sent = {row[0] for row in cursor.fetchall()}
+            logger.info("Loaded sent notifications", count=len(sent))
+            return sent
+        )
+    except sqlite3.Error as e:
+        logger.error("Failed to load sent notifications", error=str(e))
         return set()
 
-def save_sent_post(post_id: str):
-    """Save a post ID to SQLite."""
+def save_sent_post(notification_id: str):
+    """Save a notification ID to SQLite."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
-            conn.execute('INSERT OR IGNORE INTO sent_posts (post_id, saved_at) VALUES (?, ?)',
-                         (post_id.lower(), datetime.now()))
+            conn.execute('INSERT INTO notifications (id, sent_at) VALUES (?, ?)',
+                         (notification_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             conn.commit()
-        logger.info("Saved post ID", post_id=post_id)
-    except Exception as e:
-        logger.error("Error saving post ID", post_id=post_id, error=str(e))
+        logger.info("Saved notification ID", id=notification_id)
+    except sqlite3.Error as e:
+        logger.error("Failed to save notification ID", id=notification_id, error=str(e))
 
 def escape_markdown(text: str) -> str:
-    """Escape Markdown special characters to prevent parsing errors."""
+    """Escape Markdown special characters for Telegram."""
     if not text:
         return ""
-    characters = r'([*_[\]()~`>#+\-=|{}.!])'
-    return re.sub(characters, r'\\\1', text)
+    characters = r'[*_[\]()~`>#+\-=|{}!.]'
+    return re.sub(characters, r'\\1', text)
 
-async def send_telegram(message: str, client: httpx.AsyncClient) -> bool:
-    """Send a message to Telegram with rate-limiting and fallback parse modes."""
-    if not TOKEN or not CHAT_ID:
-        logger.error("Telegram TOKEN or CHAT_ID missing")
-        return False
+def send_telegram(message: str) -> bool:
+    """Send a message to Telegram."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    sanitized_message = escape_markdown(message)[:4096]
-    parse_modes = ["Markdown", "HTML", None]
-    for parse_mode in parse_modes:
-        data = {
-            "chat_id": CHAT_ID,
-            "text": sanitized_message,
-            "disable_web_page_preview": False
-        }
-        if parse_mode:
-            data["parse_mode"] = parse_mode
-        for attempt in range(3):
-            try:
-                resp = await client.post(url, json=data, timeout=TIMEOUT)
-                resp.raise_for_status()
-                logger.info("Telegram message sent", message=message[:50], parse_mode=parse_mode)
-                await asyncio.sleep(TELEGRAM_RATE_LIMIT)
-                return True
-            except httpx.RequestError as e:
-                logger.warning("Telegram send failed", attempt=attempt + 1, error=str(e))
-                await asyncio.sleep(2 ** attempt)
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 400:
-                    logger.warning("Telegram HTTP 400 error", attempt=attempt + 1, response=e.response.text, parse_mode=parse_mode)
-                    break
-                logger.warning("Telegram HTTP error", attempt=attempt + 1, status=e.response.status_code, error=str(e))
-                await asyncio.sleep(2 ** attempt)
+    data = {
+        "chat_id": CHAT_ID,
+        "text": escape_markdown(message)[:4096],  # Telegram's max message length
+        "parse_mode": "Markdown"
+    }
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(url, json=data, timeout=30)
+            resp.raise_for_status()
+            logger.info("Telegram message sent", message=message[:50])
+            time.sleep(1.0)  # Avoid rate limiting
+            return True
+        except requests.RequestException as e:
+            logger.warning("Telegram send failed", attempt=attempt, error=str(e))
+            time.sleep(2 ** attempt)
     logger.error("Failed to send Telegram message after retries", message=message[:50])
     return False
 
-async def fetch(url: str, client: httpx.AsyncClient, is_binary: bool = False) -> Optional[Union[str, bytes]]:
-    """Fetch content asynchronously, returning text for HTML or bytes for binary (e.g., PDFs)."""
+def fetch_page(url: str) -> Optional[str]:
+    """Fetch HTML content of a URL."""
     try:
-        resp = await client.get(url, headers=HEADERS, timeout=PDF_TIMEOUT if is_binary else TIMEOUT, follow_redirects=True)
-        resp.raise_for_status()
-        if is_binary:
-            logger.info("Fetched binary content", url=url, status=resp.status_code)
-            return resp.content
-        detected = detect(resp.content)
-        encoding = detected['encoding'] or 'utf-8'
-        text = resp.content.decode(encoding, errors='ignore')
-        logger.info("Fetched text content", url=url, status=resp.status_code)
-        await asyncio.sleep(2)
-        return text
-    except httpx.HTTPStatusError as e:
-        logger.error("HTTP error fetching URL", url=url, status=e.response.status_code, error=str(e))
-        return None
-    except httpx.RequestError as e:
-        logger.error("Request error fetching URL", url=url, error=str(e))
-        return None
-    except Exception as e:
-        logger.error("Error fetching URL", url=url, error=str(e))
-        return None
-
-def fetch_sync(url: str) -> Optional[str]:
-    """Fetch HTML content synchronously using requests with retries."""
-    session = requests.Session()
-    session.mount('https://', requests.adapters.HTTPAdapter(max_retries=3))
-    try:
-        resp = session.get(url, headers=HEADERS, timeout=TIMEOUT)
+        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT, verify=False)  # No SSL verification
         resp.raise_for_status()
         detected = detect(resp.content)
         encoding = detected['encoding'] or 'utf-8'
         text = resp.content.decode(encoding, errors='ignore')
-        logger.info("Fetched URL synchronously", url=url, status=resp.status_code)
-        time.sleep(2)
+        logger.info("Fetched page", url=url)
+        time.sleep(2)  # Avoid overwhelming servers
         return text
     except requests.RequestException as e:
-        logger.error("Error fetching URL synchronously", url=url, error=str(e))
+        logger.error("Failed to fetch URL", url=url, error=str(e))
         return None
-    finally:
-        session.close()
 
 def extract_date_from_text(text: str) -> Optional[datetime]:
-    """Extract a date from text using various date patterns."""
+    """Extract a date from a text string."""
     if not text:
         return None
     date_patterns = [
-        r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',
-        r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',
+        r'\b(\d{1,2}[-/\s]\d{1,2}[-/\s]\d{2,4})\b',  # DD-MM-YYYY or DD/MM/YYYY
+        r'\b(\d{4}[-/\s]\d{1,2}[-/\s]\d{1,2})\b',  # YYYY-MM-DD or YYYY/MM/DD
         r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',
         r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',
         r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',
-        r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',
-        r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.,]?\s+\d{4}\b',
     ]
     for pattern in date_patterns:
         match = re.search(pattern, text, re.I)
@@ -204,321 +142,113 @@ def extract_date_from_text(text: str) -> Optional[datetime]:
             try:
                 dt = date_parse(match.group(0), dayfirst=True)
                 if 2000 <= dt.year <= datetime.now().year + 1:
-                    logger.debug("Extracted date", date=dt, text=text[:100])
+                    logger.debug("Extracted date", date=dt, text=text[:50])
                     return dt
             except ValueError:
-                logger.debug("Failed to parse date", text=text[:100])
                 continue
     try:
         dt = date_parse(text, fuzzy=True, dayfirst=True)
         if 2000 <= dt.year <= datetime.now().year + 1:
-            logger.debug("Extracted fuzzy date", date=dt, text=text[:100])
+            logger.debug("Extracted fuzzy date", date=dt, text=text[:50])
             return dt
     except ValueError:
-        logger.debug("Failed fuzzy date parsing", text=text[:100])
+        pass
     return None
 
-async def extract_date_from_pdf(url: str, client: httpx.AsyncClient) -> Optional[datetime]:
-    """Extract a date from the first few pages of a PDF using pdfplumber and PyPDF2."""
-    try:
-        content = await fetch(url, client, is_binary=True)
-        if not content:
-            return None
-        pdf_content = BytesIO(content)
-
-        # Try pdfplumber first
-        try:
-            with pdfplumber.open(pdf_content) as pdf:
-                for page in pdf.pages[:3]:
-                    text = page.extract_text() or ""
-                    dt = extract_date_from_text(text)
-                    if dt:
-                        logger.info("Extracted PDF date with pdfplumber", date=dt, url=url)
-                        return dt
-        except Exception as e:
-            logger.warning("pdfplumber failed, trying PyPDF2", url=url, error=str(e))
-
-        # Fallback to PyPDF2
-        pdf_content.seek(0)
-        pdf_reader = PyPDF2.PdfReader(pdf_content)
-        for page_num in range(min(3, len(pdf_reader.pages))):
-            text = pdf_reader.pages[page_num].extract_text() or ""
-            dt = extract_date_from_text(text)
-            if dt:
-                logger.info("Extracted PDF date with PyPDF2", date=dt, url=url)
-                return dt
-        return None
-    except Exception as e:
-        logger.error("Error processing PDF", url=url, error=str(e))
-        return None
-
-async def extract_date(a_tag: BeautifulSoup, notification_url: str, client: httpx.AsyncClient) -> Optional[datetime]:
-    """Extract a date from an <a> tag, surrounding text, or linked page."""
-    # Skip fetching if URL is blocklisted
-    parsed_url = urlparse(notification_url)
-    if parsed_url.netloc in BLOCKLIST_DOMAINS or any(kw in notification_url.lower() for kw in BLOCKLIST_KEYWORDS):
-        logger.debug("Skipping date extraction for blocklisted URL", url=notification_url)
-        return None
-
-    candidates = []
-    if a_tag.get('title'):
-        candidates.append(a_tag.get('title'))
-    next_sibling = a_tag.find_next_sibling(string=True)
-    if next_sibling and isinstance(next_sibling, str):
-        candidates.append(next_sibling.strip())
-    if a_tag.parent:
-        candidates.append(a_tag.parent.get_text(strip=True))
-        if a_tag.parent.parent:
-            candidates.append(a_tag.parent.parent.get_text(strip=True))
-
-    # Fetch linked page only if necessary
-    try:
-        linked_html = await fetch(notification_url, client)
-        if linked_html:
-            linked_soup = BeautifulSoup(linked_html, 'html.parser')
-            meta_date = linked_soup.find('meta', attrs={'name': re.compile('date|publish', re.I)})
-            if meta_date and meta_date.get('content'):
-                candidates.append(meta_date.get('content'))
-            date_elements = linked_soup.find_all(['time', 'span', 'div'], class_=re.compile('date|publish', re.I))
-            for elem in date_elements:
-                candidates.append(elem.get_text(strip=True))
-    except Exception as e:
-        logger.warning("Failed to fetch linked page for date", url=notification_url, error=str(e))
-
-    for text in candidates:
-        dt = extract_date_from_text(text)
-        if dt:
-            logger.debug("Extracted date", date=dt, text=text[:100])
-            return dt
-        else:
-            logger.debug("No date found in candidate", text=text[:100])
-    return None
-
-def extract_date_from_url(url: str) -> Optional[datetime]:
-    """Extract a date from a URL using common date patterns."""
-    patterns = [
-        r'/(\d{4})[/-](\d{1,2})[/-]?(\d{1,2})?',
-        r'date=(\d{4})-(\d{2})-(\d{2})',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url, re.I)
-        if match:
-            try:
-                year = int(match.group(1))
-                month = int(match.group(2))
-                day = 1 if len(match.groups()) < 3 else int(match.group(3))
-                if 2000 <= year <= datetime.now().year + 1 and 1 <= month <= 12:
-                    dt = datetime(year, month, day)
-                    logger.debug("Extracted date from URL", date=dt, url=url)
-                    return dt
-            except ValueError:
-                continue
-    return None
-
-def normalize_url(url: str, base_url: str) -> str:
-    """Normalize a URL by resolving relative paths and removing fragments."""
-    try:
-        full_url = urljoin(base_url, url)
-        parsed = urlparse(full_url)
-        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        if parsed.query:
-            clean_url += f"?{parsed.query}"
-        return clean_url.lower()
-    except Exception as e:
-        logger.error("Error normalizing URL", url=url, error=str(e))
-        return url.lower()
-
-def is_notification_link(href: str, text: str) -> bool:
-    """Check if a link or text contains notification keywords."""
-    if not href and not text:
+def is_notification(text: str) -> bool:
+    """Check if text contains notification keywords."""
+    if not text:
         return False
-    text_lower = (text or "").lower()
-    href_lower = (href or "").lower()
-    return any(keyword in text_lower or keyword in href_lower for keyword in KEYWORDS)
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in KEYWORDS)
 
-def is_valid_url(url: str) -> bool:
-    """Check if a URL should be fetched (not blocklisted or invalid)."""
-    parsed = urlparse(url)
-    if parsed.netloc in BLOCKLIST_DOMAINS:
-        logger.debug("Skipping blocklisted domain", url=url, domain=parsed.netloc)
-        return False
-    if any(kw in url.lower() for kw in BLOCKLIST_KEYWORDS):
-        logger.debug("Skipping URL with blocklisted keyword", url=url)
-        return False
-    return True
-
-async def find_pdf_in_notification_page(notification_url: str, client: httpx.AsyncClient) -> Optional[str]:
-    """Check the notification page for any PDF links."""
-    if not is_valid_url(notification_url):
-        logger.debug("Skipping PDF check for invalid URL", url=notification_url)
-        return None
-    try:
-        html = await fetch(notification_url, client)
-        if not html:
-            return None
-        soup = BeautifulSoup(html, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if href.lower().endswith('.pdf'):
-                pdf_url = normalize_url(href, notification_url)
-                if is_valid_url(pdf_url):
-                    logger.info("Found PDF in notification page", pdf_url=pdf_url)
-                    return pdf_url
-                else:
-                    logger.debug("Skipping blocklisted PDF URL", pdf_url=pdf_url)
-        return None
-    except Exception as e:
-        logger.error("Error checking notification page for PDFs", url=notification_url, error=str(e))
-        return None
-
-async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncClient) -> List[Tuple[str, str]]:
-    """Parse HTML content and notify about new notifications for June 2025 or later."""
+def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
+    """Parse a URL's HTML for new notifications in the current month."""
     logger.info("Processing URL", url=url)
-    html = fetch_sync(url)
+    html = fetch_page(url)
     if not html:
-        logger.error("No data fetched", url=url)
-        async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
-            await send_telegram(f"Error: Failed to fetch {url}", temp_client)
+        send_telegram(f"Error: Failed to fetch {url}")
         return []
-    if len(html.strip()) < 100:
-        logger.warning("Page content is very short, possibly JavaScript-rendered", url=url, length=len(html))
 
     soup = BeautifulSoup(html, 'html.parser')
-    new_posts = []
     notifications = []
-    links_checked = 0
-    keyword_matches = 0
+    current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)  # June 1, 2025
+    logger.info("Filtering notifications for current month", start=current_month_start)
 
-    # Define date filter: June 1, 2025 or later
-    current_month_start = datetime(2025, 6, 1, 0, 0, 0)
-    logger.info("Filtering notifications for dates", start=current_month_start)
-
-    for a in soup.find_all('a', href=True):
-        links_checked += 1
-        text = a.get_text(strip=True)
-        href = a['href']
-
-        if not is_notification_link(href, text):
-            logger.debug("Skipping non-notification link", text=text[:50], href=href[:100])
-            continue
-        keyword_matches += 1
-
-        post_id = normalize_url(href, url)
-        if not is_valid_url(post_id):
-            logger.info("Skipping invalid or blocklisted notification URL", post_id=post_id)
+    # Check all elements for notifications
+    for element in soup.find_all(['p', 'div', 'li', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+        text = element.get_text(strip=True)
+        if not is_notification(text):
             continue
 
-        logger.debug("Processing notification", href=href[:100], post_id=post_id)
-
-        if post_id in sent_posts:
-            logger.info("Skipping already sent notification", post_id=post_id)
+        # Generate a unique ID for the notification
+        notification_id = f"{url}:{text[:100]}".lower()
+        if notification_id in sent_posts:
+            logger.info("Skipping already sent notification", id=notification_id)
             continue
 
-        # Extract full text
-        full_text = text or "No title available"
-        if a.parent:
-            parent_text = a.parent.get_text(strip=True)
-            full_text = parent_text if len(parent_text) > len(full_text) else full_text
+        # Extract date from element or parent
+        date = None
+        candidates = [text]
+        if element.parent:
+            candidates.append(element.parent.get_text(strip=True))
+        for candidate in candidates:
+            dt = extract_date_from_text(candidate)
+            if dt:
+                date = dt
+                break
 
-        # Extract date
-        post_date = await extract_date(a, post_id, client)
-        is_pdf = post_id.lower().endswith('.pdf')
-        if is_pdf and not post_date:
-            post_date = await extract_date_from_pdf(post_id, client)
-        if not post_date:
-            post_date = extract_date_from_url(post_id)
-
-        # Check for PDF
-        pdf_url = None
-        if is_pdf:
-            pdf_url = post_id
-        else:
-            pdf_url = await find_pdf_in_notification_page(post_id, client)
-
-        if post_date:
-            if post_date < current_month_start:
-                logger.info("Skipping notification before June 2025", post_id=post_id, date=post_date)
-                continue
-
+        # Filter for current month
+        if date and date >= current_month_start:
             msg = f"*New Notification*\n\n"
             msg += f"Website: {url}\n"
-            msg += f"Title: {text or 'Untitled Notification'}\n"
-            msg += f"URL: {post_id}\n"
-            msg += f"Publish Date: {post_date.strftime('%Y-%m-%d')}\n"
-            if pdf_url:
-                msg += f"PDF URL: {pdf_url}\n"
-            msg += f"\n*Full Text*:\n{full_text[:1500]}\n"
+            msg += f"Text: {text}\n"
+            msg += f"Date: {date.strftime('%Y-%m-%d')}\n"
+            notifications.append((notification_id, msg))
+        elif not date:
+            # Send notification if no date is found but it's likely new
+            msg = f"*New Notification*\n\n"
+            msg += f"Website: {url}\n"
+            msg += f"Text: {text}\n"
+            notifications.append((notification_id, msg))
 
-            notifications.append({"title": text, "url": post_id, "date": post_date, "pdf_url": pdf_url, "msg": msg})
-        else:
-            logger.info("No date found for notification, skipping", post_id=post_id, text=text[:50], href=href[:100])
+    logger.info("Found notifications", url=url, count=len(notifications))
+    return notifications
 
-    logger.info("Parsing complete", url=url, links_checked=links_checked, keyword_matches=keyword_matches, notifications_found=len(notifications))
-    if not keyword_matches:
-        logger.warning("No links matched notification keywords", url=url, keywords=KEYWORDS)
-
-    # Process notifications
-    for n in notifications:
-        new_posts.append((n["url"], n["msg"]))
-
-    if not notifications:
-        logger.warning(f"No notifications found for June 2025 or later", url=url)
-        async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
-            await send_telegram(f"Warning: No notifications found on {url} for June 2025 or later", temp_client)
-
-    # Send summary notification
-    if notifications:
-        unique_notifications = set(f"{n['title']}:{n['url']}" for n in notifications)
-        if len(unique_notifications) == 1:
-            n = notifications[0]
-            await send_telegram(
-                f"All notifications for {url} are identical:\n\nTitle: {n['title']}\nURL: {n['url']}\nDate: {n['date'].strftime('%Y-%m-%d')}\n{'PDF URL: ' + n['pdf_url'] if n['pdf_url'] else ''}",
-                client
-            )
-        else:
-            latest = max(notifications, key=lambda x: x['date'])
-            await send_telegram(
-                f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {latest['date'].strftime('%Y-%m-%d')}\n{'PDF URL: ' + latest['pdf_url'] if latest['pdf_url'] else ''}",
-                client
-            )
-
-    return new_posts
-
-async def main(urls: List[str] = URLS):
-    """Main function to monitor URLs and send notifications."""
+def main(urls: List[str] = URLS):
+    """Monitor URLs for new notifications and send to Telegram."""
     init_db()
     logger.info("Monitoring started")
     sent_posts = load_sent_posts()
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        for url in urls:
-            if not url:
-                logger.error("Invalid URL, skipping", url=url)
-                continue
-            if not url.startswith(('http://', 'https://')):
-                url = f"https://{url}"
-                logger.info("Added https:// to URL", url=url)
-            try:
-                new_posts = await parse_and_notify(url, sent_posts, client)
-                for post_id, message in new_posts:
-                    if await send_telegram(message, client):
-                        save_sent_post(post_id)
-                        sent_posts.add(post_id)
-                        logger.info("Sent and saved notification", post_id=post_id)
-                    else:
-                        logger.error("Failed to send notification", post_id=post_id)
-            except Exception as e:
-                logger.error("Error processing URL", url=url, error=str(e))
-                async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
-                    await send_telegram(f"Error processing {url}: {str(e)}", temp_client)
-            await asyncio.sleep(2)
+
+    for url in urls:
+        if not url:
+            logger.error("Empty URL, skipping")
+            continue
+        if not url.startswith(('http://', 'https://')):
+            url = f"https://{url}"
+            logger.info("Prepended https:// to URL", url=url)
+
+        try:
+            notifications = parse_notifications(url, sent_posts)
+            for notification_id, message in notifications:
+                if send_telegram(message):
+                    save_sent_post(notification_id)
+                    sent_posts.add(notification_id)
+                    logger.info("Sent notification", id=notification_id)
+                else:
+                    logger.error("Failed to send notification", id=notification_id)
+        except Exception as e:
+            logger.error("Error processing URL", url=url, error=str(e))
+            send_telegram(f"Error processing {url}: {str(e)}")
+        time.sleep(2)
 
 if __name__ == "__main__":
     import argparse
-    import asyncio
-    parser = argparse.ArgumentParser(description="Website Monitor")
+    parser = argparse.ArgumentParser(description="Website Notification Monitor")
     parser.add_argument('--urls', nargs='+', default=URLS, help="URLs to monitor")
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help="Logging level")
     args = parser.parse_args()
 
     logging.getLogger().setLevel(args.log_level)
-    asyncio.run(main(args.urls))
+    main(args.urls)
