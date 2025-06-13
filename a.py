@@ -179,8 +179,9 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
 
     soup = BeautifulSoup(html, 'html.parser')
     notifications = []
-    current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)  # June 1, 2025
-    logger.info("Filtering notifications for current month", start=current_month_start)
+    now = datetime.now()
+    current_year, current_month = now.year, now.month
+    logger.info("Filtering notifications for current month", year=current_year, month=current_month)
 
     # Check specific elements for notifications
     for element in soup.find_all(['li', 'p', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
@@ -214,15 +215,15 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
                 date = dt
                 break
 
-        # Only include notifications with a June 2025 date
-        if date and date >= current_month_start:
+        # Only include notifications in the current month
+        if date and date.year == current_year and date.month == current_month:
             msg = f"*New Notification*\n\n"
             msg += f"Website: {url}\n"
             msg += f"Text: {text}\n"
             msg += f"Date: {date.strftime('%Y-%m-%d')}\n"
             notifications.append((notification_id, msg))
         else:
-            logger.debug("Skipping notification without June 2025 date", text=text[:50])
+            logger.debug("Skipping notification not in current month", text=text[:50], date=date)
 
     logger.info("Found notifications", url=url, count=len(notifications))
     return notifications
