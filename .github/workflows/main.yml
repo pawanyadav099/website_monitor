@@ -1,4 +1,5 @@
 name: Job Monitor Bot
+
 on:
   schedule:
     - cron: '*/40 * * * *'  # Run every 40 minutes
@@ -10,30 +11,33 @@ on:
 jobs:
   scrape-and-notify:
     runs-on: ubuntu-latest
+
     steps:
-      # Checkout the repository
+      # ✅ Checkout the repository
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Set up Python environment
+      # ✅ Set safe git directory (important for GitHub-hosted runners)
+      - name: Set git safe directory
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
+
+      # ✅ Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'  # Use a stable Python version
+          python-version: '3.9'
           cache: 'pip'
 
-      # Install dependencies
+      # ✅ Install Python dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            echo "requirements.txt not found, installing required packages directly"
             pip install requests httpx beautifulsoup4 urllib3 python-dotenv PyPDF2 pdfplumber python-dateutil
-          fi
 
-      # Debug environment variables
+      # ✅ Debug secret environment variables (optional)
       - name: Debug environment variables
         run: |
           echo "TOKEN is set: ${TOKEN:+set}"
@@ -42,7 +46,7 @@ jobs:
           TOKEN: ${{ secrets.TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
 
-      # Run the scraper script
+      # ✅ Run your Python script
       - name: Run monitor script
         env:
           TOKEN: ${{ secrets.TOKEN }}
@@ -50,21 +54,20 @@ jobs:
         run: |
           python a.py
 
-      # Commit and push sent_posts.txt
+      # ✅ Commit and push updates to sent_posts.txt
       - name: Commit and push sent_posts.txt
-        if: always()  # Run even if the script fails
+        if: always()
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
+          git pull --rebase origin main
           git add sent_posts.txt
           git commit -m "Update sent_posts.txt" || echo "No changes to commit"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/pawanyadav099/website_monitor.git HEAD:main
 
-      # Upload sent_posts.txt as an artifact for debugging
+      # ✅ Upload as an artifact (for debugging / restore)
       - name: Upload sent_posts.txt
-        if: always()  # Upload even if the job fails
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sent-posts
