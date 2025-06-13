@@ -42,7 +42,8 @@ TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=60))
 HEADERS = {
     "User-Agent": config.get('DEFAULT', 'user_agent', fallback="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 }
-KEYWORDS = config.get('DEFAULT', 'keywords', fallback="job,result,notification,admit card,notice,exam,interview,vacancy,recruitment,call letter,application,schedule").split(',')
+KEYWORDS = config.get('DEFAULT', 'keywords', fallback="recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key").split(',')
+EXCLUDE_WORDS = ["home", "about us", "contact", "main navigation", "menu"]
 SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_messages.db")
 
 # Validate environment variables
@@ -85,7 +86,6 @@ def save_sent_post(notification_id: str):
 def send_telegram(message: str, url: str) -> bool:
     """Send a message to Telegram without escaping text or date."""
     telegram_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    # No escaping for text or date, only ensure message is valid
     lines = message.split('\n')
     formatted_lines = [lines[0]]  # *New Notification*
     formatted_lines.append("")  # Blank line
@@ -129,17 +129,18 @@ def fetch_page(url: str) -> Optional[str]:
         return None
 
 def extract_date_from_text(text: str) -> Optional[datetime]:
-    """Extract a date from a text string with enhanced patterns."""
+    """Extract a date from a text string with strict patterns."""
     if not text:
         return None
+    # Month names for validation
+    month_names = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
     date_patterns = [
-        r'\b(\d{1,2}[-/\s]\d{1,2}[-/\s]\d{2,4})\b',  # DD-MM-YYYY or DD/MM/YYYY
+        r'\b(\d{1,2}[-/\s]\d{1,2}[-/\s]\d{4})\b',  # DD-MM-YYYY or DD/MM/YYYY
         r'\b(\d{4}[-/\s]\d{1,2}[-/\s]\d{1,2})\b',  # YYYY-MM-DD or YYYY/MM/DD
-        r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',  # DD Month YYYY
-        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',  # DD(st/nd) Jan YYYY
-        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',  # DD-Jan-YYYY
-        r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',  # Month DD, YYYY
-        r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.,]?\s+\d{4}\b',  # DD Jan YYYY
+        rf'\b(\d{{1,2}}\s+{month_names}\s+\d{{4}})\b',  # DD Month YYYY
+        rf'\b(\d{{1,2}}(?:st|nd|rd|th)?\s+{month_names}\s+\d{{4}})\b',  # DD(st/nd) Month YYYY
+        rf'\b(\d{{1,2}}-{month_names}-\d{{4}})\b',  # DD-Month-YYYY
+        rf'\b({month_names}\s+\d{{1,2}},?\s+\d{{4}})\b',  # Month DD, YYYY
         r'\b(\d{4}/\d{2}/\d{2})\b',  # YYYY/MM/DD
         r'\b(\d{2}/\d{2}/\d{4})\b',  # MM/DD/YYYY or DD/MM/YYYY
     ]
@@ -149,25 +150,33 @@ def extract_date_from_text(text: str) -> Optional[datetime]:
             try:
                 dt = date_parse(match.group(0), dayfirst=True)
                 if 2000 <= dt.year <= datetime.now().year + 1:
-                    logger.debug("Extracted date", date=dt, text=text[:50])
-                    return dt
+                    # Validate month in text
+                    text_lower = text.lower()
+                    month_str = dt.strftime('%B').lower()[:3]
+                    if month_str in text_lower or dt.strftime('%m') in text_lower:
+                        logger.debug("Extracted date", date=dt, text=text[:50])
+                        return dt
             except ValueError:
                 continue
-    try:
-        dt = date_parse(text, fuzzy=True, dayfirst=True)
-        if 2000 <= dt.year <= datetime.now().year + 1:
-            logger.debug("Extracted fuzzy date", date=dt, text=text[:50])
-            return dt
-    except ValueError:
-        pass
+    logger.debug("No valid date found", text=text[:50])
     return None
 
 def is_notification(text: str) -> bool:
-    """Check if text contains notification keywords."""
-    if not text:
+    """Check if text is a valid notification."""
+    if not text or len(text) < 20 or len(text) > 500:
         return False
     text_lower = text.lower()
-    return any(keyword in text_lower for keyword in KEYWORDS)
+    # Exclude navigational or generic text
+    if any(word in text_lower for word in EXCLUDE_WORDS):
+        return False
+    # Require at least one primary keyword
+    primary_keywords = ["recruitment", "vacancy", "exam", "admit card", "interview", "application", "results", "answer key"]
+    has_primary = any(keyword in text_lower for keyword in primary_keywords)
+    return has_primary
+
+def normalize_text(text: str) -> str:
+    """Normalize text for duplicate checking."""
+    return re.sub(r'\s+', ' ', text.strip()).lower()
 
 def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
     """Parse a URL's HTML for new notifications in the current month."""
@@ -183,28 +192,27 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
     current_year, current_month = now.year, now.month
     logger.info("Filtering notifications for current month", year=current_year, month=current_month)
 
-    # Check specific elements for notifications
-    for element in soup.find_all(['li', 'p', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+    # Focus on notification-specific tags
+    for element in soup.find_all(['li', 'p', 'a']):
         text = element.get_text(strip=True)
-        if not text or len(text) < 10 or len(text) > 1000:  # Skip empty, short, or overly long text
-            continue
         if not is_notification(text):
             continue
 
-        # Generate a unique ID for the notification
-        notification_id = f"{url}:{hash(text)}".lower()  # Use hash to ensure uniqueness
-        if notification_id in sent_posts:
-            logger.info("Skipping already sent notification", id=notification_id)
+        # Normalize text for duplicate checking
+        normalized_text = normalize_text(text)
+        if not normalized_text:
             continue
 
-        # Extract date from element, parent, or siblings
+        # Generate a unique ID
+        notification_id = f"{url}:{hash(normalized_text)}".lower()
+        if notification_id in sent_posts:
+            logger.info("Skipping already sent notification", id=notification_id, text=text[:50])
+            continue
+
+        # Extract date from element or <time> tag
         date = None
         candidates = [text]
-        if element.parent:
-            candidates.append(element.parent.get_text(strip=True))
-        for sibling in element.find_next_siblings(limit=3):
-            candidates.append(sibling.get_text(strip=True))
-        time_tag = element.find_previous('time') or element.find_next('time')
+        time_tag = element.find('time') or element.find_parent('time') or element.find_next('time')
         if time_tag:
             candidates.append(time_tag.get_text(strip=True))
             if time_tag.get('datetime'):
@@ -217,11 +225,17 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
 
         # Only include notifications in the current month
         if date and date.year == current_year and date.month == current_month:
-            msg = f"*New Notification*\n\n"
-            msg += f"Website: {url}\n"
-            msg += f"Text: {text}\n"
-            msg += f"Date: {date.strftime('%Y-%m-%d')}\n"
-            notifications.append((notification_id, msg))
+            # Validate month in text
+            text_lower = text.lower()
+            month_str = date.strftime('%B').lower()[:3]
+            if month_str in text_lower or date.strftime('%m') in text_lower:
+                msg = f"*New Notification*\n\n"
+                msg += f"Website: {url}\n"
+                msg += f"Text: {text}\n"
+                msg += f"Date: {date.strftime('%Y-%m-%d')}\n"
+                notifications.append((notification_id, msg))
+            else:
+                logger.debug("Skipping notification with mismatched month in text", text=text[:50], date=date)
         else:
             logger.debug("Skipping notification not in current month", text=text[:50], date=date)
 
@@ -252,7 +266,7 @@ def main(urls: List[str] = URLS):
                 if send_telegram(message, url):
                     save_sent_post(notification_id)
                     sent_posts.add(notification_id)
-                    logger.info("Sent notification", id=notification_id)
+                    logger.info("Sent notification", id=notification_id, message=message[:50])
                 else:
                     logger.error("Failed to send notification", id=notification_id)
         except Exception as e:
