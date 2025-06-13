@@ -53,6 +53,16 @@ KEYWORDS = config.get('DEFAULT', 'keywords', fallback="job,result,notification,a
 SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_posts.db")
 TELEGRAM_RATE_LIMIT = float(config.get('DEFAULT', 'telegram_rate_limit', fallback=0.5))
 
+# Blocklist of domains and keywords to skip
+BLOCKLIST_DOMAINS = [
+    'examinationservices.nic.in',
+    'testservices.nic.in',
+    'ntaresults.nic.in',
+    'twitter.com',
+    'x.com',
+]
+BLOCKLIST_KEYWORDS = ['login', 'auth', 'share', 'downloadadmitcard']
+
 # Validate environment variables
 if not TOKEN or not CHAT_ID:
     logger.error("Missing Telegram TOKEN or CHAT_ID", token_set=bool(TOKEN), chat_id_set=bool(CHAT_ID))
@@ -180,13 +190,13 @@ def extract_date_from_text(text: str) -> Optional[datetime]:
     if not text:
         return None
     date_patterns = [
-        r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',  # DD-MM-YYYY or DD/MM/YYYY
-        r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',    # YYYY-MM-DD or YYYY/MM/DD
-        r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',  # DD Month YYYY
-        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',  # DD(st/nd) Mon YYYY
-        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',  # DD-Mon-YYYY
-        r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',  # Month DD, YYYY
-        r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.,]?\s+\d{4}\b',  # DD Mon, YYYY
+        r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',
+        r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',
+        r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',
+        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',
+        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',
+        r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',
+        r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.,]?\s+\d{4}\b',
     ]
     for pattern in date_patterns:
         match = re.search(pattern, text, re.I)
@@ -244,6 +254,12 @@ async def extract_date_from_pdf(url: str, client: httpx.AsyncClient) -> Optional
 
 async def extract_date(a_tag: BeautifulSoup, notification_url: str, client: httpx.AsyncClient) -> Optional[datetime]:
     """Extract a date from an <a> tag, surrounding text, or linked page."""
+    # Skip fetching if URL is blocklisted
+    parsed_url = urlparse(notification_url)
+    if parsed_url.netloc in BLOCKLIST_DOMAINS or any(kw in notification_url.lower() for kw in BLOCKLIST_KEYWORDS):
+        logger.debug("Skipping date extraction for blocklisted URL", url=notification_url)
+        return None
+
     candidates = []
     if a_tag.get('title'):
         candidates.append(a_tag.get('title'))
@@ -255,7 +271,7 @@ async def extract_date(a_tag: BeautifulSoup, notification_url: str, client: http
         if a_tag.parent.parent:
             candidates.append(a_tag.parent.parent.get_text(strip=True))
 
-    # Fetch linked page for additional date context
+    # Fetch linked page only if necessary
     try:
         linked_html = await fetch(notification_url, client)
         if linked_html:
@@ -320,8 +336,22 @@ def is_notification_link(href: str, text: str) -> bool:
     href_lower = (href or "").lower()
     return any(keyword in text_lower or keyword in href_lower for keyword in KEYWORDS)
 
+def is_valid_url(url: str) -> bool:
+    """Check if a URL should be fetched (not blocklisted or invalid)."""
+    parsed = urlparse(url)
+    if parsed.netloc in BLOCKLIST_DOMAINS:
+        logger.debug("Skipping blocklisted domain", url=url, domain=parsed.netloc)
+        return False
+    if any(kw in url.lower() for kw in BLOCKLIST_KEYWORDS):
+        logger.debug("Skipping URL with blocklisted keyword", url=url)
+        return False
+    return True
+
 async def find_pdf_in_notification_page(notification_url: str, client: httpx.AsyncClient) -> Optional[str]:
     """Check the notification page for any PDF links."""
+    if not is_valid_url(notification_url):
+        logger.debug("Skipping PDF check for invalid URL", url=notification_url)
+        return None
     try:
         html = await fetch(notification_url, client)
         if not html:
@@ -331,8 +361,11 @@ async def find_pdf_in_notification_page(notification_url: str, client: httpx.Asy
             href = a['href']
             if href.lower().endswith('.pdf'):
                 pdf_url = normalize_url(href, notification_url)
-                logger.info("Found PDF in notification page", pdf_url=pdf_url)
-                return pdf_url
+                if is_valid_url(pdf_url):
+                    logger.info("Found PDF in notification page", pdf_url=pdf_url)
+                    return pdf_url
+                else:
+                    logger.debug("Skipping blocklisted PDF URL", pdf_url=pdf_url)
         return None
     except Exception as e:
         logger.error("Error checking notification page for PDFs", url=notification_url, error=str(e))
@@ -357,7 +390,7 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
     keyword_matches = 0
 
     # Define date filter: June 1, 2025 or later
-    current_month_start = datetime(2025, 6, 1, 0, 0, 0)  # Hardcode June 1, 2025
+    current_month_start = datetime(2025, 6, 1, 0, 0, 0)
     logger.info("Filtering notifications for dates", start=current_month_start)
 
     for a in soup.find_all('a', href=True):
@@ -371,6 +404,10 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
         keyword_matches += 1
 
         post_id = normalize_url(href, url)
+        if not is_valid_url(post_id):
+            logger.info("Skipping invalid or blocklisted notification URL", post_id=post_id)
+            continue
+
         logger.debug("Processing notification", href=href[:100], post_id=post_id)
 
         if post_id in sent_posts:
@@ -382,14 +419,6 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
         if a.parent:
             parent_text = a.parent.get_text(strip=True)
             full_text = parent_text if len(parent_text) > len(full_text) else full_text
-        try:
-            linked_html = await fetch(post_id, client)
-            if linked_html:
-                linked_soup = BeautifulSoup(linked_html, 'html.parser')
-                main_content = linked_soup.find('div', class_=['content', 'main', 'article', 'post']) or linked_soup
-                full_text = main_content.get_text(strip=True)[:2000] if main_content else full_text
-        except Exception as e:
-            logger.warning("Failed to fetch full text from notification page", post_id=post_id, error=str(e))
 
         # Extract date
         post_date = await extract_date(a, post_id, client)
