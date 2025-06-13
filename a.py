@@ -4,10 +4,10 @@ import sqlite3
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
-from typing import List, Set, Optional, Tuple, Union  # Added Union import
+from typing import List, Set, Optional, Tuple, Union
 
 import requests
 import httpx
@@ -15,7 +15,6 @@ from bs4 import BeautifulSoup
 from charset_normalizer import detect
 from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
-from filelock import FileLock
 import pdfplumber
 import PyPDF2
 import structlog
@@ -45,14 +44,13 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Configuration defaults
-TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=15))
-PDF_TIMEOUT = int(config.get('DEFAULT', 'pdf_timeout', fallback=20))
+TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=30))  # Increased timeout
+PDF_TIMEOUT = int(config.get('DEFAULT', 'pdf_timeout', fallback=30))
 HEADERS = {
     "User-Agent": config.get('DEFAULT', 'user_agent', fallback="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 }
 KEYWORDS = config.get('DEFAULT', 'keywords', fallback="job,result,notification,admit card,notice,exam,interview,vacancy,recruitment,call letter,merit list,schedule,announcement,bulletin").split(',')
 SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_posts.db")
-LOCK_FILE = config.get('DEFAULT', 'lock_file', fallback="website_monitor.lock")
 TELEGRAM_RATE_LIMIT = float(config.get('DEFAULT', 'telegram_rate_limit', fallback=0.1))
 
 # Validate environment variables
@@ -111,8 +109,11 @@ async def send_telegram(message: str, client: httpx.AsyncClient) -> bool:
             logger.info("Telegram message sent", message=message[:50])
             await asyncio.sleep(TELEGRAM_RATE_LIMIT)
             return True
-        except httpx.RequestException as e:
+        except httpx.RequestError as e:  # Fixed: RequestException -> RequestError
             logger.warning("Telegram send failed", attempt=attempt + 1, error=str(e))
+            await asyncio.sleep(2 ** attempt)
+        except httpx.HTTPStatusError as e:
+            logger.warning("Telegram HTTP error", attempt=attempt + 1, status=e.response.status_code, error=str(e))
             await asyncio.sleep(2 ** attempt)
     logger.error("Failed to send Telegram message after retries", message=message[:50])
     return False
@@ -120,7 +121,7 @@ async def send_telegram(message: str, client: httpx.AsyncClient) -> bool:
 async def fetch(url: str, client: httpx.AsyncClient, is_binary: bool = False) -> Optional[Union[str, bytes]]:
     """Fetch content asynchronously, returning text for HTML or bytes for binary (e.g., PDFs)."""
     try:
-        resp = await client.get(url, headers=HEADERS, timeout=PDF_TIMEOUT if is_binary else TIMEOUT)
+        resp = await client.get(url, headers=HEADERS, timeout=PDF_TIMEOUT if is_binary else TIMEOUT, follow_redirects=True)
         resp.raise_for_status()
         if is_binary:
             logger.info("Fetched binary content", url=url, status=resp.status_code)
@@ -134,14 +135,19 @@ async def fetch(url: str, client: httpx.AsyncClient, is_binary: bool = False) ->
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error fetching URL", url=url, status=e.response.status_code, error=str(e))
         return None
+    except httpx.RequestError as e:
+        logger.error("Request error fetching URL", url=url, error=str(e))
+        return None
     except Exception as e:
         logger.error("Error fetching URL", url=url, error=str(e))
         return None
 
 def fetch_sync(url: str) -> Optional[str]:
-    """Fetch HTML content synchronously using requests."""
+    """Fetch HTML content synchronously using requests with retries."""
+    session = requests.Session()
+    session.mount('https://', requests.adapters.HTTPAdapter(max_retries=3))
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        resp = session.get(url, headers=HEADERS, timeout=TIMEOUT)
         resp.raise_for_status()
         detected = detect(resp.content)
         encoding = detected['encoding'] or 'utf-8'
@@ -152,6 +158,8 @@ def fetch_sync(url: str) -> Optional[str]:
     except requests.RequestException as e:
         logger.error("Error fetching URL synchronously", url=url, error=str(e))
         return None
+    finally:
+        session.close()
 
 def extract_date_from_text(text: str) -> Optional[datetime]:
     """Extract a date from text using various date patterns."""
@@ -312,28 +320,24 @@ async def find_pdf_in_notification_page(notification_url: str, client: httpx.Asy
         return None
 
 async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncClient) -> List[Tuple[str, str]]:
-    """Parse HTML content and notify about new notifications."""
+    """Parse HTML content and notify about new notifications for current or future months."""
     logger.info("Processing URL", url=url)
     html = fetch_sync(url)
     if not html:
         logger.error("No data fetched", url=url)
-        async with httpx.AsyncClient(verify=False, timeout=TIMOUT) as temp_client:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
             await send_telegram(f"Error: Failed to fetch {url}", temp_client)
         return []
 
     soup = BeautifulSoup(html, 'html.parser')
     new_posts = []
     notifications = []
-    latest_no_date = None
     links_checked = 0
 
+    # Define the date filter: June 2025 or later
     now = datetime.now()
-    start_of_week = now - timedelta(days=now.weekday())  # Monday, June 9, 2025
-    end_of_week = start_of_week + timedelta(days=6)      # Sunday, June 15, 2025
-    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_week = end_of_week.replace(hour=23, minute=59, second=59, microsecond=999999)
-
-    logger.info("Filtering notifications for week", start=start_of_week, end=end_of_week)
+    current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    logger.info("Filtering notifications for dates", start=current_month_start)
 
     for a in soup.find_all('a', href=True):
         links_checked += 1
@@ -381,11 +385,8 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
             pdf_url = await find_pdf_in_notification_page(post_id, client)
 
         if post_date:
-            if post_date < start_of_week:
-                logger.info("Stopping at old notification", post_id=post_id, date=post_date)
-                break
-            if not (start_of_week <= post_date <= end_of_week):
-                logger.info("Skipping notification not in current week", post_id=post_id, date=post_date)
+            if post_date < current_month_start:
+                logger.info("Skipping notification before current month", post_id=post_id, date=post_date)
                 continue
 
             msg = f"*New Notification*\n\n"
@@ -399,47 +400,19 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
 
             notifications.append({"title": text, "url": post_id, "date": post_date, "pdf_url": pdf_url, "msg": msg})
         else:
-            # Store first notification without date as potential latest
-            if not latest_no_date:
-                latest_no_date = {
-                    "title": text,
-                    "url": post_id,
-                    "pdf_url": pdf_url,
-                    "full_text": full_text
-                }
-            logger.info("No date found for notification", post_id=post_id)
+            logger.info("No date found for notification, skipping", post_id=post_id)
+            continue
 
     logger.info("Parsing complete", url=url, links_checked=links_checked, notifications_found=len(notifications))
 
-    # Process notifications with dates
+    # Process notifications
     for n in notifications:
         new_posts.append((n["url"], n["msg"]))
 
-    # Handle case where no notifications have dates
-    if not notifications and latest_no_date:
-        post_id = latest_no_date["url"]
-        if post_id not in sent_posts:
-            msg = f"*New Notification (Latest, Date Not Found)*\n\n"
-            msg += f"Website: {url}\n"
-            msg += f"Title: {latest_no_date['title'] or 'Untitled Notification'}\n"
-            msg += f"URL: {post_id}\n"
-            msg += f"Publish Date: Not found, assumed to be the latest notification\n"
-            if latest_no_date["pdf_url"]:
-                msg += f"PDF URL: {latest_no_date['pdf_url']}\n"
-            msg += f"\n*Full Text*:\n{latest_no_date['full_text'][:1500]}\n"
-            new_posts.append((post_id, msg))
-            notifications.append({
-                "title": latest_no_date["title"],
-                "url": post_id,
-                "date": datetime.now(),
-                "pdf_url": latest_no_date["pdf_url"],
-                "msg": msg
-            })
-
     if not notifications:
-        logger.warning("No notifications found", url=url)
-        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
-            await send_telegram(f"Warning: No notifications found on {url} for the current week", temp_client)
+        logger.warning("No notifications found for current or future months", url=url)
+        async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
+            await send_telegram(f"Warning: No notifications found on {url} for June 2025 or later", temp_client)
 
     # Send summary notification
     if notifications:
@@ -447,13 +420,13 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
         if len(unique_notifications) == 1:
             n = notifications[0]
             await send_telegram(
-                f"All notifications for {url} this week are identical:\n\nTitle: {n['title']}\nURL: {n['url']}\nDate: {'Not found, latest' if 'Date Not Found' in n['msg'] else n['date'].strftime('%Y-%m-%d')}\n{'PDF URL: ' + n['pdf_url'] if n['pdf_url'] else ''}",
+                f"All notifications for {url} are identical:\n\nTitle: {n['title']}\nURL: {n['url']}\nDate: {n['date'].strftime('%Y-%m-%d')}\n{'PDF URL: ' + n['pdf_url'] if n['pdf_url'] else ''}",
                 client
             )
         else:
             latest = max(notifications, key=lambda x: x['date'])
             await send_telegram(
-                f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {'Not found, latest' if 'Date Not Found' in latest['msg'] else latest['date'].strftime('%Y-%m-%d')}\n{'PDF URL: ' + latest['pdf_url'] if latest['pdf_url'] else ''}",
+                f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {latest['date'].strftime('%Y-%m-%d')}\n{'PDF URL: ' + latest['pdf_url'] if latest['pdf_url'] else ''}",
                 client
             )
 
@@ -462,46 +435,31 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
 async def main(urls: List[str] = URLS):
     """Main function to monitor URLs and send notifications."""
     init_db()
-    lock = FileLock(LOCK_FILE)
-    any_notifications_found = False
-    try:
-        with lock.acquire(timeout=1):
-            logger.info("Monitoring started")
-            sent_posts = load_sent_posts()
-            async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as client:
-                for url in urls:
-                    if not url:
-                        logger.error("Invalid URL, skipping", url=url)
-                        continue
-                    try:
-                        new_posts = await parse_and_notify(url, sent_posts, client)
-                        if new_posts:
-                            any_notifications_found = True
-                        for post_id, message in new_posts:
-                            if await send_telegram(message, client):
-                                save_sent_post(post_id)
-                                sent_posts.add(post_id)
-                                logger.info("Sent and saved notification", post_id=post_id)
-                            else:
-                                logger.error("Failed to send notification", post_id=post_id)
-                    except Exception as e:
-                        logger.error("Error processing URL", url=url, error=str(e))
-                        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
-                            await send_telegram(f"Error processing {url}: {str(e)}", temp_client)
-                    await asyncio.sleep(2)
-                if not any_notifications_found:
-                    async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
-                        await send_telegram("No notifications found across all URLs for the current week", temp_client)
-                    logger.info("No notifications found for any URL")
-    except Exception as e:
-        logger.error("Script failed", error=str(e))
-        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
-            await send_telegram(f"Script failed: {str(e)}", temp_client)
-        raise
-    finally:
-        if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
-            logger.info("Cleaned up lock file")
+    logger.info("Monitoring started")
+    sent_posts = load_sent_posts()
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for url in urls:
+            if not url:
+                logger.error("Invalid URL, skipping", url=url)
+                continue
+            # Ensure URL has scheme
+            if not url.startswith(('http://', 'https://')):
+                url = f"https://{url}"
+                logger.info("Added https:// to URL", url=url)
+            try:
+                new_posts = await parse_and_notify(url, sent_posts, client)
+                for post_id, message in new_posts:
+                    if await send_telegram(message, client):
+                        save_sent_post(post_id)
+                        sent_posts.add(post_id)
+                        logger.info("Sent and saved notification", post_id=post_id)
+                    else:
+                        logger.error("Failed to send notification", post_id=post_id)
+            except Exception as e:
+                logger.error("Error processing URL", url=url, error=str(e))
+                async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
+                    await send_telegram(f"Error processing {url}: {str(e)}", temp_client)
+            await asyncio.sleep(2)
 
 if __name__ == "__main__":
     import argparse
