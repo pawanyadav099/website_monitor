@@ -82,17 +82,10 @@ def save_sent_post(notification_id: str):
     except sqlite3.Error as e:
         logger.error("Failed to save notification ID", id=notification_id, error=str(e))
 
-def escape_markdown(text: str) -> str:
-    """Escape Markdown special characters for Telegram."""
-    if not text:
-        return ""
-    characters = r'([*_[\]()~`>#+\-=|{}!.])'
-    return re.sub(characters, r'\\\1', text)
-
 def send_telegram(message: str, url: str) -> bool:
-    """Send a message to Telegram with unescaped URL."""
+    """Send a message to Telegram without escaping text or date."""
     telegram_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    # Split message to isolate text and date for escaping
+    # No escaping for text or date, only ensure message is valid
     lines = message.split('\n')
     formatted_lines = [lines[0]]  # *New Notification*
     formatted_lines.append("")  # Blank line
@@ -100,7 +93,7 @@ def send_telegram(message: str, url: str) -> bool:
         if line.startswith("Website:"):
             formatted_lines.append(f"Website: {url}")
         else:
-            formatted_lines.append(escape_markdown(line))
+            formatted_lines.append(line)  # No escaping
     formatted_message = "\n".join(formatted_lines)[:4096]  # Telegram's max length
     data = {
         "chat_id": CHAT_ID,
@@ -181,7 +174,7 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
     logger.info("Processing URL", url=url)
     html = fetch_page(url)
     if not html:
-        send_telegram(f"Error: Failed to fetch {url}", url)
+        logger.error("No HTML content fetched, skipping notifications", url=url)
         return []
 
     soup = BeautifulSoup(html, 'html.parser')
@@ -192,7 +185,7 @@ def parse_notifications(url: str, sent_posts: set) -> List[Tuple[str, str]]:
     # Check specific elements for notifications
     for element in soup.find_all(['li', 'p', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
         text = element.get_text(strip=True)
-        if not text or len(text) < 10:  # Skip empty or very short text
+        if not text or len(text) < 10 or len(text) > 1000:  # Skip empty, short, or overly long text
             continue
         if not is_notification(text):
             continue
@@ -249,6 +242,10 @@ def main(urls: List[str] = URLS):
             logger.info("Prepended https:// to URL", url=url)
 
         try:
+            # Basic URL validation
+            if not re.match(r'^https?://[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}/?.*$', url):
+                logger.error("Invalid URL format, skipping", url=url)
+                continue
             notifications = parse_notifications(url, sent_posts)
             for notification_id, message in notifications:
                 if send_telegram(message, url):
@@ -259,7 +256,6 @@ def main(urls: List[str] = URLS):
                     logger.error("Failed to send notification", id=notification_id)
         except Exception as e:
             logger.error("Error processing URL", url=url, error=str(e))
-            send_telegram(f"Error processing {url}: {str(e)}", url)
         time.sleep(2)
 
 if __name__ == "__main__":
