@@ -83,7 +83,7 @@ def save_sent_post(notification_id: str):
         logger.error("Failed to save notification ID", id=notification_id, error=str(e))
 
 def escape_markdown(text: str) -> str:
-    """Escape Markdown special characters for Telegram, excluding URLs."""
+    """Escape Markdown special characters for Telegram."""
     if not text:
         return ""
     characters = r'([*_[\]()~`>#+\-=|{}!.])'
@@ -92,15 +92,19 @@ def escape_markdown(text: str) -> str:
 def send_telegram(message: str, url: str) -> bool:
     """Send a message to Telegram with unescaped URL."""
     telegram_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    # Escape message but not the URL
-    message_parts = message.split("Website: ")
-    if len(message_parts) == 2:
-        formatted_message = f"{message_parts[0]}Website: {url}\n{escape_markdown(message_parts[1].split('\n', 1)[1])}"
-    else:
-        formatted_message = escape_markdown(message)
+    # Split message to isolate text and date for escaping
+    lines = message.split('\n')
+    formatted_lines = [lines[0]]  # *New Notification*
+    formatted_lines.append("")  # Blank line
+    for line in lines[2:]:
+        if line.startswith("Website:"):
+            formatted_lines.append(f"Website: {url}")
+        else:
+            formatted_lines.append(escape_markdown(line))
+    formatted_message = "\n".join(formatted_lines)[:4096]  # Telegram's max length
     data = {
         "chat_id": CHAT_ID,
-        "text": formatted_message[:4096],  # Telegram's max message length
+        "text": formatted_message,
         "parse_mode": "Markdown"
     }
     for attempt in range(1, 4):
