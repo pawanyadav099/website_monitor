@@ -9,10 +9,14 @@ from io import BytesIO
 import re
 import PyPDF2
 import pdfplumber
-from urllib.parse import urljoin, urlparse, urlencode, parse_qs
+from urllib.parse import urljoin, urlparse
 from dotenv import load_dotenv
 import logging
 import time
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # For Windows compatibility
 
 from url import URLS  # List of URLs to monitor
 
@@ -55,12 +59,38 @@ HEADERS = {
 }
 
 SENT_POSTS_FILE = "sent_posts.txt"
+LOCK_FILE = "website_monitor.lock"
 
 KEYWORDS = [
     "job", "result", "notification", "admit card", "notice", "exam",
     "interview", "vacancy", "recruitment", "call letter", "merit list",
     "schedule", "announcement", "bulletin"
 ]
+
+def acquire_lock():
+    """Acquire a file-based lock to prevent concurrent runs."""
+    if not fcntl:
+        logger.warning("fcntl not available, skipping lock (Windows environment?)")
+        return None
+    lock_file = open(LOCK_FILE, 'w')
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        logger.info("Acquired lock")
+        return lock_file
+    except IOError:
+        logger.warning("Another instance is running, exiting")
+        lock_file.close()
+        exit(1)
+
+def release_lock(lock_file):
+    """Release the file-based lock."""
+    if not lock_file:
+        return
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    lock_file.close()
+    if os.path.exists(LOCK_FILE):
+        os.remove(LOCK_FILE)
+    logger.info("Released lock")
 
 def contains_keyword(text):
     """Check if text contains any predefined keywords."""
@@ -77,8 +107,8 @@ def load_sent_posts():
         return sent_posts
     try:
         with open(SENT_POSTS_FILE, "r", encoding="utf-8") as f:
-            sent_posts = set(line.strip() for line in f if line.strip())
-        logger.info(f"Loaded {len(sent_posts)} sent posts")
+            sent_posts = set(line.strip().lower() for line in f if line.strip())
+        logger.info(f"Loaded {len(sent_posts)} sent posts: {sent_posts}")
         return sent_posts
     except Exception as e:
         logger.error(f"Error reading {SENT_POSTS_FILE}: {e}")
@@ -87,10 +117,20 @@ def load_sent_posts():
 def save_sent_post(post_id):
     """Save a post ID to the sent posts file."""
     try:
+        # Check write permissions
+        if os.path.exists(SENT_POSTS_FILE) and not os.access(SENT_POSTS_FILE, os.W_OK):
+            logger.error(f"No write permission for {SENT_POSTS_FILE}")
+            return
         with open(SENT_POSTS_FILE, "a", encoding="utf-8") as f:
-            f.write(post_id + "\n")
+            f.write(post_id.lower() + "\n")
             f.flush()
+            os.fsync(f.fileno())
         logger.info(f"Saved post ID: {post_id}")
+        # Verify save
+        with open(SENT_POSTS_FILE, "r", encoding="utf-8") as f:
+            content = f.read().lower()
+            if post_id.lower() not in content:
+                logger.error(f"Failed to verify save of post ID: {post_id}")
     except Exception as e:
         logger.error(f"Error saving post {post_id} to {SENT_POSTS_FILE}: {e}")
 
@@ -106,9 +146,9 @@ def send_telegram(message):
         "parse_mode": "Markdown",
         "disable_web_page_preview": False
     }
-    for attempt in range(2):
+    for attempt in range(3):
         try:
-            r = requests.post(url, data=data, timeout=10)
+            r = requests.post(url, data=data, timeout=15)
             r.raise_for_status()
             logger.info("Telegram message sent successfully")
             time.sleep(2)
@@ -122,18 +162,18 @@ def send_telegram(message):
 def fetch(url):
     """Fetch HTML content from a URL with fallback to httpx."""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10, verify=False)
+        resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
         resp.raise_for_status()
-        logger.info(f"Fetched {url} successfully")
+        logger.info(f"Fetched {url} successfully (status: {resp.status_code})")
         time.sleep(2)
         return resp.text
     except requests.exceptions.SSLError as ssl_err:
         logger.warning(f"SSL Error for {url}: {ssl_err}. Trying httpx...")
         try:
-            with httpx.Client(verify=False, timeout=10) as client:
+            with httpx.Client(verify=False, timeout=15) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
-                logger.info(f"Fetched {url} successfully")
+                logger.info(f"Fetched {url} successfully with httpx (status: {resp.status_code})")
                 time.sleep(2)
                 return resp.text
         except Exception as e:
@@ -160,12 +200,14 @@ def extract_date_from_text(text):
             try:
                 dt = date_parse(match.group(1), dayfirst=True)
                 if 2000 <= dt.year <= datetime.now().year + 1:
+                    logger.debug(f"Extracted date {dt} from text: {text}")
                     return dt
             except ValueError:
                 continue
     try:
         dt = date_parse(text, fuzzy=True, dayfirst=True)
         if 2000 <= dt.year <= datetime.now().year + 1:
+            logger.debug(f"Extracted fuzzy date {dt} from text: {text}")
             return dt
     except ValueError:
         pass
@@ -174,7 +216,7 @@ def extract_date_from_text(text):
 def extract_date_from_pdf(url):
     """Extract a date from a PDF file by parsing its text content."""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15, verify=False)
+        r = requests.get(url, headers=HEADERS, timeout=20, verify=False)
         r.raise_for_status()
         pdf_file = BytesIO(r.content)
         try:
@@ -227,6 +269,7 @@ def extract_date(a_tag):
     for text in candidates:
         dt = extract_date_from_text(text)
         if dt:
+            logger.debug(f"Extracted date {dt} from <a> tag: {text}")
             return dt
     return None
 
@@ -244,34 +287,25 @@ def extract_date_from_url(url):
                 month = int(match.group(2))
                 day = 1 if len(match.groups()) < 3 else int(match.group(3))
                 if 2000 <= year <= datetime.now().year + 1 and 1 <= month <= 12:
-                    return datetime(year, month, day)
+                    dt = datetime(year, month, day)
+                    logger.debug(f"Extracted date {dt} from URL: {url}")
+                    return dt
             except ValueError:
                 continue
     return None
 
 def normalize_url(url, base_url):
-    """Normalize a URL by resolving relative paths and sorting query parameters."""
+    """Normalize a URL by resolving relative paths and removing fragments."""
     try:
         full_url = urljoin(base_url, url)
         parsed = urlparse(full_url)
-        query_params = parse_qs(parsed.query)
-        sorted_query = urlencode({k: v[0] for k, v in sorted(query_params.items())}, doseq=True)
         clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        if sorted_query:
-            clean_url += f"?{sorted_query}"
-        return clean_url.rstrip('/')
+        if parsed.query:
+            clean_url += f"?{parsed.query}"
+        return clean_url.lower()
     except Exception as e:
         logger.error(f"Error normalizing URL {url}: {e}")
-        return url
-
-def is_valid_url(url):
-    """Check if a URL is valid by sending a HEAD request."""
-    try:
-        result = requests.head(url, headers=HEADERS, timeout=5, allow_redirects=True, verify=False)
-        return result.status_code < 400
-    except requests.RequestException as e:
-        logger.error(f"Error validating URL {url}: {e}")
-        return False
+        return url.lower()
 
 def is_post_link(href, base_url):
     """Check if a link is a relevant PDF link containing keywords."""
@@ -280,7 +314,10 @@ def is_post_link(href, base_url):
     full_url = normalize_url(href, base_url)
     if not full_url.lower().endswith('.pdf'):
         return False
-    return contains_keyword(full_url) or contains_keyword(href)
+    if contains_keyword(full_url) or contains_keyword(href):
+        logger.debug(f"Relevant PDF link found: {full_url}")
+        return True
+    return False
 
 def parse_and_notify(url, sent_posts):
     """Parse HTML content and notify about new PDF posts."""
@@ -321,10 +358,6 @@ def parse_and_notify(url, sent_posts):
             logger.info(f"Skipping already sent post: {post_id}")
             continue
 
-        if not is_valid_url(post_id):
-            logger.warning(f"Skipping invalid URL: {post_id}")
-            continue
-
         post_date = extract_date(a)
         is_pdf = post_id.lower().endswith('.pdf')
         if is_pdf and not post_date:
@@ -354,7 +387,8 @@ def parse_and_notify(url, sent_posts):
         new_posts.append((post_id, msg))
         notifications.append({"title": text, "url": post_id, "date": post_date})
 
-    if notifications:
+    # Send summary notification only for new posts
+    if new_posts:
         unique_notifications = set(f"{n['title']}:{n['url']}" for n in notifications)
         if len(unique_notifications) == 1:
             logger.info(f"All {len(notifications)} notifications are identical: {notifications[0]['title']}")
@@ -368,25 +402,29 @@ def parse_and_notify(url, sent_posts):
 
 def main():
     """Main function to monitor URLs and send notifications."""
-    logger.info("Monitoring started...")
-    sent_posts = load_sent_posts()
-    for url in URLS:
-        try:
-            new_posts = parse_and_notify(url, sent_posts)
-            if not new_posts:
-                logger.info(f"No new relevant PDFs found for {url}")
+    lock_file = acquire_lock()
+    try:
+        logger.info("Monitoring started...")
+        sent_posts = load_sent_posts()
+        for url in URLS:
+            try:
+                new_posts = parse_and_notify(url, sent_posts)
+                if not new_posts:
+                    logger.info(f"No new relevant PDFs found for {url}")
+                    continue
+                for post_id, message in new_posts:
+                    if send_telegram(message):
+                        save_sent_post(post_id)
+                        sent_posts.add(post_id)
+                        logger.info(f"Sent and saved notification for: {post_id}")
+                    else:
+                        logger.error(f"Failed to send notification for: {post_id}")
+            except Exception as e:
+                logger.error(f"Error processing {url}: {e}")
                 continue
-            for post_id, message in new_posts:
-                if send_telegram(message):
-                    save_sent_post(post_id)
-                    sent_posts.add(post_id)
-                    logger.info(f"Sent and saved notification for: {post_id}")
-                else:
-                    logger.error(f"Failed to send notification for: {post_id}")
-        except Exception as e:
-            logger.error(f"Error processing {url}: {e}")
-            continue
-        time.sleep(2)
+            time.sleep(2)
+    finally:
+        release_lock(lock_file)
 
 if __name__ == "__main__":
     main()
