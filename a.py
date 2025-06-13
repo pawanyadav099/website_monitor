@@ -66,7 +66,6 @@ def load_sent_posts() -> set:
             sent = {row[0] for row in cursor.fetchall()}
             logger.info("Loaded sent notifications", count=len(sent))
             return sent
-        )
     except sqlite3.Error as e:
         logger.error("Failed to load sent notifications", error=str(e))
         return set()
