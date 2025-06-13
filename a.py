@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
-from typing import List, Set, Optional, Tuple
+from typing import List, Set, Optional, Tuple, Union  # Added Union import
 
 import requests
 import httpx
@@ -317,7 +317,7 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
     html = fetch_sync(url)
     if not html:
         logger.error("No data fetched", url=url)
-        async with httpx.AsyncClient(verify=False, timeout=TIMEOUT) as temp_client:
+        async with httpx.AsyncClient(verify=False, timeout=TIMOUT) as temp_client:
             await send_telegram(f"Error: Failed to fetch {url}", temp_client)
         return []
 
@@ -505,6 +505,7 @@ async def main(urls: List[str] = URLS):
 
 if __name__ == "__main__":
     import argparse
+    import asyncio
     parser = argparse.ArgumentParser(description="Website Monitor")
     parser.add_argument('--urls', nargs='+', default=URLS, help="URLs to monitor")
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help="Logging level")
