@@ -5,6 +5,7 @@ import os
 import re
 import time
 from datetime import datetime
+from typing import Optional, List  # Added for type hints
 import requests
 from bs4 import BeautifulSoup
 from charset_normalizer import detect
@@ -64,8 +65,8 @@ def load_sent_posts() -> set:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
             cursor = conn.execute('SELECT id FROM notifications')
             sent = {row[0] for row in cursor.fetchall()}
-            logger.info("Loaded sent notifications", count=len(sent))
-            return sent
+        logger.info("Loaded sent notifications", count=len(sent))
+        return sent
     except sqlite3.Error as e:
         logger.error("Failed to load sent notifications", error=str(e))
         return set()
@@ -85,8 +86,8 @@ def escape_markdown(text: str) -> str:
     """Escape Markdown special characters for Telegram."""
     if not text:
         return ""
-    characters = r'[*_[\]()~`>#+\-=|{}!.]'
-    return re.sub(characters, r'\\1', text)
+    characters = r'([*_[\]()~`>#+\-=|{}!.])'
+    return re.sub(characters, r'\\\1', text)
 
 def send_telegram(message: str) -> bool:
     """Send a message to Telegram."""
