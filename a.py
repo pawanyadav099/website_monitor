@@ -44,21 +44,21 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Configuration defaults
-TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=30))  # Increased timeout
+TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=30))
 PDF_TIMEOUT = int(config.get('DEFAULT', 'pdf_timeout', fallback=30))
 HEADERS = {
     "User-Agent": config.get('DEFAULT', 'user_agent', fallback="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 }
 KEYWORDS = config.get('DEFAULT', 'keywords', fallback="job,result,notification,admit card,notice,exam,interview,vacancy,recruitment,call letter,merit list,schedule,announcement,bulletin").split(',')
 SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_posts.db")
-TELEGRAM_RATE_LIMIT = float(config.get('DEFAULT', 'telegram_rate_limit', fallback=0.1))
+TELEGRAM_RATE_LIMIT = float(config.get('DEFAULT', 'telegram_rate_limit', fallback=0.5))
 
 # Validate environment variables
 if not TOKEN or not CHAT_ID:
     logger.error("Missing Telegram TOKEN or CHAT_ID", token_set=bool(TOKEN), chat_id_set=bool(CHAT_ID))
     exit(1)
 else:
-    logger.info("Successfully loaded TOKEN and CHAT_ID")
+    logger.info("Successfully loaded TOKEN and CHAT_ID", chat_id=CHAT_ID, token_prefix=TOKEN[:5] + "***")
 
 def init_db():
     """Initialize SQLite database for sent posts."""
@@ -90,31 +90,45 @@ def save_sent_post(post_id: str):
     except Exception as e:
         logger.error("Error saving post ID", post_id=post_id, error=str(e))
 
+def escape_markdown(text: str) -> str:
+    """Escape Markdown special characters to prevent parsing errors."""
+    if not text:
+        return ""
+    characters = r'([*_[\]()~`>#+\-=|{}.!])'
+    return re.sub(characters, r'\\\1', text)
+
 async def send_telegram(message: str, client: httpx.AsyncClient) -> bool:
-    """Send a message to Telegram with rate-limiting."""
+    """Send a message to Telegram with rate-limiting and fallback parse modes."""
     if not TOKEN or not CHAT_ID:
         logger.error("Telegram TOKEN or CHAT_ID missing")
         return False
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    data = {
-        "chat_id": CHAT_ID,
-        "text": message[:4096],  # Telegram message length limit
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False
-    }
-    for attempt in range(3):
-        try:
-            resp = await client.post(url, json=data, timeout=TIMEOUT)
-            resp.raise_for_status()
-            logger.info("Telegram message sent", message=message[:50])
-            await asyncio.sleep(TELEGRAM_RATE_LIMIT)
-            return True
-        except httpx.RequestError as e:  # Fixed: RequestException -> RequestError
-            logger.warning("Telegram send failed", attempt=attempt + 1, error=str(e))
-            await asyncio.sleep(2 ** attempt)
-        except httpx.HTTPStatusError as e:
-            logger.warning("Telegram HTTP error", attempt=attempt + 1, status=e.response.status_code, error=str(e))
-            await asyncio.sleep(2 ** attempt)
+    sanitized_message = escape_markdown(message)[:4096]
+    parse_modes = ["Markdown", "HTML", None]
+    for parse_mode in parse_modes:
+        data = {
+            "chat_id": CHAT_ID,
+            "text": sanitized_message,
+            "disable_web_page_preview": False
+        }
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        for attempt in range(3):
+            try:
+                resp = await client.post(url, json=data, timeout=TIMEOUT)
+                resp.raise_for_status()
+                logger.info("Telegram message sent", message=message[:50], parse_mode=parse_mode)
+                await asyncio.sleep(TELEGRAM_RATE_LIMIT)
+                return True
+            except httpx.RequestError as e:
+                logger.warning("Telegram send failed", attempt=attempt + 1, error=str(e))
+                await asyncio.sleep(2 ** attempt)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 400:
+                    logger.warning("Telegram HTTP 400 error", attempt=attempt + 1, response=e.response.text, parse_mode=parse_mode)
+                    break
+                logger.warning("Telegram HTTP error", attempt=attempt + 1, status=e.response.status_code, error=str(e))
+                await asyncio.sleep(2 ** attempt)
     logger.error("Failed to send Telegram message after retries", message=message[:50])
     return False
 
@@ -166,29 +180,32 @@ def extract_date_from_text(text: str) -> Optional[datetime]:
     if not text:
         return None
     date_patterns = [
-        r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',
-        r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',
-        r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',
-        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',
-        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',
+        r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',  # DD-MM-YYYY or DD/MM/YYYY
+        r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',    # YYYY-MM-DD or YYYY/MM/DD
+        r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{2,4})\b',  # DD Month YYYY
+        r'\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b',  # DD(st/nd) Mon YYYY
+        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4})\b',  # DD-Mon-YYYY
+        r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b',  # Month DD, YYYY
+        r'\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.,]?\s+\d{4}\b',  # DD Mon, YYYY
     ]
     for pattern in date_patterns:
         match = re.search(pattern, text, re.I)
         if match:
             try:
-                dt = date_parse(match.group(1), dayfirst=True)
+                dt = date_parse(match.group(0), dayfirst=True)
                 if 2000 <= dt.year <= datetime.now().year + 1:
-                    logger.debug("Extracted date", date=dt, text=text[:50])
+                    logger.debug("Extracted date", date=dt, text=text[:100])
                     return dt
             except ValueError:
+                logger.debug("Failed to parse date", text=text[:100])
                 continue
     try:
         dt = date_parse(text, fuzzy=True, dayfirst=True)
         if 2000 <= dt.year <= datetime.now().year + 1:
-            logger.debug("Extracted fuzzy date", date=dt, text=text[:50])
+            logger.debug("Extracted fuzzy date", date=dt, text=text[:100])
             return dt
     except ValueError:
-        pass
+        logger.debug("Failed fuzzy date parsing", text=text[:100])
     return None
 
 async def extract_date_from_pdf(url: str, client: httpx.AsyncClient) -> Optional[datetime]:
@@ -255,8 +272,10 @@ async def extract_date(a_tag: BeautifulSoup, notification_url: str, client: http
     for text in candidates:
         dt = extract_date_from_text(text)
         if dt:
-            logger.debug("Extracted date", date=dt, text=text[:50])
+            logger.debug("Extracted date", date=dt, text=text[:100])
             return dt
+        else:
+            logger.debug("No date found in candidate", text=text[:100])
     return None
 
 def extract_date_from_url(url: str) -> Optional[datetime]:
@@ -320,7 +339,7 @@ async def find_pdf_in_notification_page(notification_url: str, client: httpx.Asy
         return None
 
 async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncClient) -> List[Tuple[str, str]]:
-    """Parse HTML content and notify about new notifications for current or future months."""
+    """Parse HTML content and notify about new notifications for June 2025 or later."""
     logger.info("Processing URL", url=url)
     html = fetch_sync(url)
     if not html:
@@ -328,15 +347,17 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
         async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
             await send_telegram(f"Error: Failed to fetch {url}", temp_client)
         return []
+    if len(html.strip()) < 100:
+        logger.warning("Page content is very short, possibly JavaScript-rendered", url=url, length=len(html))
 
     soup = BeautifulSoup(html, 'html.parser')
     new_posts = []
     notifications = []
     links_checked = 0
+    keyword_matches = 0
 
-    # Define the date filter: June 2025 or later
-    now = datetime.now()
-    current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # Define date filter: June 1, 2025 or later
+    current_month_start = datetime(2025, 6, 1, 0, 0, 0)  # Hardcode June 1, 2025
     logger.info("Filtering notifications for dates", start=current_month_start)
 
     for a in soup.find_all('a', href=True):
@@ -345,11 +366,12 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
         href = a['href']
 
         if not is_notification_link(href, text):
-            logger.debug("Skipping non-notification link", text=text, href=href)
+            logger.debug("Skipping non-notification link", text=text[:50], href=href[:100])
             continue
+        keyword_matches += 1
 
         post_id = normalize_url(href, url)
-        logger.debug("Processing notification", href=href, post_id=post_id)
+        logger.debug("Processing notification", href=href[:100], post_id=post_id)
 
         if post_id in sent_posts:
             logger.info("Skipping already sent notification", post_id=post_id)
@@ -386,7 +408,7 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
 
         if post_date:
             if post_date < current_month_start:
-                logger.info("Skipping notification before current month", post_id=post_id, date=post_date)
+                logger.info("Skipping notification before June 2025", post_id=post_id, date=post_date)
                 continue
 
             msg = f"*New Notification*\n\n"
@@ -400,17 +422,18 @@ async def parse_and_notify(url: str, sent_posts: Set[str], client: httpx.AsyncCl
 
             notifications.append({"title": text, "url": post_id, "date": post_date, "pdf_url": pdf_url, "msg": msg})
         else:
-            logger.info("No date found for notification, skipping", post_id=post_id)
-            continue
+            logger.info("No date found for notification, skipping", post_id=post_id, text=text[:50], href=href[:100])
 
-    logger.info("Parsing complete", url=url, links_checked=links_checked, notifications_found=len(notifications))
+    logger.info("Parsing complete", url=url, links_checked=links_checked, keyword_matches=keyword_matches, notifications_found=len(notifications))
+    if not keyword_matches:
+        logger.warning("No links matched notification keywords", url=url, keywords=KEYWORDS)
 
     # Process notifications
     for n in notifications:
         new_posts.append((n["url"], n["msg"]))
 
     if not notifications:
-        logger.warning("No notifications found for current or future months", url=url)
+        logger.warning(f"No notifications found for June 2025 or later", url=url)
         async with httpx.AsyncClient(timeout=TIMEOUT) as temp_client:
             await send_telegram(f"Warning: No notifications found on {url} for June 2025 or later", temp_client)
 
@@ -442,7 +465,6 @@ async def main(urls: List[str] = URLS):
             if not url:
                 logger.error("Invalid URL, skipping", url=url)
                 continue
-            # Ensure URL has scheme
             if not url.startswith(('http://', 'https://')):
                 url = f"https://{url}"
                 logger.info("Added https:// to URL", url=url)
