@@ -5,7 +5,7 @@ import os
 import re
 import time
 from datetime import datetime
-from typing import Optional, List  # Added for type hints
+from typing import Optional, List, Tuple  # Added Tuple for parse_notifications
 import requests
 from bs4 import BeautifulSoup
 from charset_normalizer import detect
