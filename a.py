@@ -360,7 +360,7 @@ def parse_and_notify(url, sent_posts):
         if len(unique_notifications) == 1:
             logger.info(f"All {len(notifications)} notifications are identical: {notifications[0]['title']}")
 send_telegram(f"All notifications for {url} this week are identical:\n\nTitle: {notifications[0]['title']}\nURL: {notifications[0]['url']}\nDate: {notifications[0]['date'].strftime('%Y-%m-%d')}\n")
-        else:
+else:
             latest = max(notifications, key=lambda x: x['date'])
             logger.info(f"Found {len(notifications)} notifications, latest: {latest['title']} on {latest['date'].strftime('%Y-%m-%d')}}\n")
             send_telegram(f"New notification found for {url}:\n\nTitle: {latest['title']}\nURL: {latest['url']}\nDate: {latest['date'].strftime('%Y-%m-%d')}}\n")
