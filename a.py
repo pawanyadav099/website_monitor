@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     'rss_timeout': 30,
     'sitemap_timeout': 30,
     'max_concurrent_requests': 1,  # Single request
-    'delay_between_requests': 600,  # 10 minutes base delay
+    'delay_between_requests': 30,  # 30 seconds for testing, revert to 600 for production
     'respect_robots': True,
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 }
@@ -304,6 +304,7 @@ def fetch_with_requests(url: str) -> Optional[str]:
 
 async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
     """Fetch page with aiohttp, falling back to Playwright or requests."""
+    logger.debug(f"Fetching page: {url}")
     if not url.startswith(('http://', 'https://')):
         url = f'https://{url}'
     headers = {
@@ -319,10 +320,11 @@ async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
             async with session.get(
                 url, 
                 headers=headers, 
-                timeout=TIMEOUT,
+                timeout=aiohttp.ClientTimeout(total=TIMEOUT),
                 proxy=proxy,
                 ssl=False  # Disable SSL verification
             ) as response:
+                logger.debug(f"Received response for {url}: {response.status}")
                 if response.status == 403:
                     logger.warning(f"403 Forbidden on {url} with aiohttp")
                     AIOHTTP_FAILURES[url] += 1
@@ -340,11 +342,16 @@ async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
                     AIOHTTP_FAILURES[url] += 1
                     break
                 AIOHTTP_FAILURES[url] = 0  # Reset failure count on success
+                logger.debug(f"Successfully fetched {url}")
                 return content
-        except Exception as e:
+        except aiohttp.ClientError as e:
             logger.warning(f"Attempt {attempt} failed for URL: {url}", error=str(e))
             AIOHTTP_FAILURES[url] += 1
             await asyncio.sleep(2 ** attempt)
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout fetching {url}")
+            AIOHTTP_FAILURES[url] += 1
+            break
     
     # Check if aiohttp failures exceed threshold
     if AIOHTTP_FAILURES[url] >= AIOHTTP_FAILURE_THRESHOLD:
@@ -353,6 +360,7 @@ async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
     
     # Fallback to Playwright if cookies are available
     if os.path.exists(COOKIE_FILE):
+        logger.debug(f"Trying Playwright fallback for {url}")
         playwright_content = await fetch_with_playwright(url)
         if playwright_content:
             AIOHTTP_FAILURES[url] = 0  # Reset failure count
@@ -502,22 +510,30 @@ async def send_telegram_notification(notification: Dict[str, str], url: str) -> 
 
 async def check_robots_txt(url: str, session: aiohttp.ClientSession) -> Tuple[bool, float]:
     if not RESPECT_ROBOTS:
+        logger.debug(f"Skipping robots.txt check for {url} (respect_robots=False)")
         return True, DELAY_BETWEEN_REQUESTS
     parsed = urlparse(url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    logger.debug(f"Checking robots.txt at {robots_url}")
     try:
         async with session.get(robots_url, timeout=10, ssl=False) as response:
+            logger.debug(f"robots.txt response for {robots_url}: {response.status}")
             if response.status == 200:
                 content = await response.text()
                 if f"User-agent: {USER_AGENT.split('/')[0]}" in content:
                     if "Disallow: /" in content:
+                        logger.info(f"robots.txt disallows crawling for {url}")
                         return False, 0
                     delay_match = re.search(r"Crawl-delay:\s*(\d+)", content)
                     if delay_match:
-                        return True, float(delay_match.group(1))
+                        delay = float(delay_match.group(1))
+                        logger.debug(f"Found crawl-delay: {delay}s for {url}")
+                        return True, delay
+                logger.debug(f"No specific restrictions in robots.txt for {url}")
                 return True, DELAY_BETWEEN_REQUESTS
             return True, DELAY_BETWEEN_REQUESTS
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to fetch robots.txt for {url}", error=str(e))
         return True, DELAY_BETWEEN_REQUESTS
 
 async def fetch_rss_feed(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
@@ -529,13 +545,16 @@ async def fetch_rss_feed(url: str, session: aiohttp.ClientSession) -> Optional[L
     ]
     for path in feed_paths:
         feed_url = urljoin(base_url, path)
+        logger.debug(f"Attempting to fetch RSS feed at {feed_url}")
         try:
             async with session.get(feed_url, timeout=RSS_TIMEOUT, ssl=False) as response:
                 if response.status == 200:
                     content = await response.text()
+                    logger.debug(f"Successfully fetched RSS feed at {feed_url}")
                     return parse_feed(content, base_url)
         except Exception as e:
             logger.debug(f"Failed to fetch RSS feed at {feed_url}", error=str(e))
+    logger.debug(f"No valid RSS feeds found for {url}")
     return None
 
 def parse_feed(content: str, base_url: str) -> List[Dict]:
@@ -563,11 +582,14 @@ def parse_feed(content: str, base_url: str) -> List[Dict]:
 async def fetch_sitemap(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
     parsed = urlparse(url)
     sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
+    logger.debug(f"Attempting to fetch sitemap at {sitemap_url}")
     try:
         async with session.get(sitemap_url, timeout=SITEMAP_TIMEOUT, ssl=False) as response:
             if response.status == 200:
                 content = await response.text()
+                logger.debug(f"Successfully fetched sitemap at {sitemap_url}")
                 return parse_sitemap(content)
+        logger.debug(f"Sitemap not found at {sitemap_url}")
     except Exception as e:
         logger.debug(f"Failed to fetch sitemap at {sitemap_url}", error=str(e))
     return None
@@ -590,11 +612,15 @@ def parse_sitemap(content: str) -> List[Dict]:
     return items
 
 async def process_url(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
+    logger.info(f"Processing URL: {url}")
     allowed, delay = await check_robots_txt(url, session)
     if not allowed:
         logger.info(f"Skipping {url} due to robots.txt restrictions")
         return None
-    await asyncio.sleep(delay + random.uniform(0, 600))  # Randomize delay up to 20 minutes
+    total_delay = delay + random.uniform(0, 60)  # Randomize delay up to 1 minute for testing
+    logger.info(f"Waiting {total_delay:.2f}s before fetching {url} (robots.txt delay: {delay}s)")
+    await asyncio.sleep(total_delay)
+    logger.debug(f"Finished waiting, proceeding to fetch {url}")
     rss_items = await fetch_rss_feed(url, session)
     if rss_items:
         logger.debug(f"Found {len(rss_items)} items in RSS feed for {url}")
@@ -607,9 +633,11 @@ async def process_url(url: str, session: aiohttp.ClientSession) -> Optional[List
     html = await fetch_page(url, session)
     if html:
         return extract_notifications(url, html)
+    logger.warning(f"No content retrieved for {url}")
     return None
 
 async def monitor_urls(urls: List[str]):
+    logger.info(f"Starting monitor_urls with {len(urls)} URLs")
     init_db()
     cleanup_old_entries()
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -618,6 +646,7 @@ async def monitor_urls(urls: List[str]):
             async with aiohttp.ClientSession(cookies=load_cookies()) as session:
                 return await process_url(url, session)
     while True:
+        logger.info("Starting new monitoring cycle")
         tasks = [process_with_semaphore(url) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for url, result in zip(urls, results):
@@ -625,7 +654,9 @@ async def monitor_urls(urls: List[str]):
                 logger.error(f"Failed to process URL: {url}", error=str(result))
                 continue
             elif not result:
+                logger.debug(f"No notifications found for {url}")
                 continue
+            logger.debug(f"Processing {len(result)} notifications for {url}")
             for notification in result:
                 if 'content_hash' not in notification:
                     text = notification.get('text', notification.get('title', ''))
@@ -633,6 +664,7 @@ async def monitor_urls(urls: List[str]):
                     notification['semantic_hash'] = generate_semantic_hash(text)
                     notification['id'] = f"{url}:{notification['content_hash']}"
                 if is_notification_sent(notification['content_hash'], notification['semantic_hash']):
+                    logger.debug(f"Notification already sent: {notification['id']}")
                     continue
                 if await send_telegram_notification(notification, url):
                     mark_notification_sent(
@@ -646,7 +678,9 @@ async def monitor_urls(urls: List[str]):
                     logger.info(f"Sent notification: {notification['id']}")
                 else:
                     logger.error(f"Failed to send notification: {notification['id']}")
-        await asyncio.sleep(random.uniform(DELAY_BETWEEN_REQUESTS, DELAY_BETWEEN_REQUESTS + 600))  # 10–20 minutes
+        cycle_delay = random.uniform(DELAY_BETWEEN_REQUESTS, DELAY_BETWEEN_REQUESTS + 60)
+        logger.info(f"Waiting {cycle_delay:.2f}s before next monitoring cycle")
+        await asyncio.sleep(cycle_delay)
 
 if __name__ == "__main__":
     import argparse
