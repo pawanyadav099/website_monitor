@@ -6,7 +6,7 @@ import re
 import random
 import asyncio
 import aiohttp
-import ssl
+import json
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple
@@ -15,6 +15,7 @@ from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 import structlog
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 from sentence_transformers import SentenceTransformer, util
 from urllib.parse import urljoin, urlparse
 from url import URLS  # Import URLs from url.py file
@@ -41,12 +42,15 @@ config.read('config.ini')
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
-# New: Proxy pool (add your proxies here)
+# Proxy pool (add your proxies here)
 PROXY_POOL = [
     None,  # No proxy
     # Example: "http://user:pass@proxy1:port",
     # Example: "http://user:pass@proxy2:port",
 ]
+
+# Cookie storage for persistence
+COOKIE_FILE = "cookies.json"
 
 # Configuration defaults
 DEFAULT_CONFIG = {
@@ -62,8 +66,8 @@ DEFAULT_CONFIG = {
     'notification_age_days': 30,
     'rss_timeout': 30,
     'sitemap_timeout': 30,
-    'max_concurrent_requests': 5,
-    'delay_between_requests': 1,
+    'max_concurrent_requests': 1,  # Reduced to 1 for human-like behavior
+    'delay_between_requests': 10,  # Increased to 10s to avoid rate limits
     'respect_robots': True,
     'user_agent': 'GovNotificationBot/1.0 (+https://github.com/yourrepo)'
 }
@@ -89,14 +93,36 @@ USER_AGENT = config.get('DEFAULT', 'user_agent', fallback=DEFAULT_CONFIG['user_a
 # Load sentence transformer model
 model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
-# User Agents for rotation
+# User Agents for rotation (updated to latest browser versions)
 USER_AGENTS = [
-    USER_AGENT,
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/126.0.2592.81",
 ]
+
+def save_cookies(cookies: List[Dict]):
+    """Save cookies to a file for persistence."""
+    try:
+        with open(COOKIE_FILE, 'w') as f:
+            json.dump(cookies, f)
+        logger.debug("Cookies saved to file")
+    except Exception as e:
+        logger.error(f"Failed to save cookies: {str(e)}")
+
+def load_cookies() -> List[Dict]:
+    """Load cookies from a file."""
+    try:
+        if os.path.exists(COOKIE_FILE):
+            with open(COOKIE_FILE, 'r') as f:
+                cookies = json.load(f)
+            logger.debug("Cookies loaded from file")
+            return cookies
+        return []
+    except Exception as e:
+        logger.error(f"Failed to load cookies: {str(e)}")
+        return []
 
 def init_db():
     try:
@@ -175,29 +201,56 @@ def mark_notification_sent(url: str, notification_id: str, content_hash: str, se
         logger.error("Failed to mark notification as sent", error=str(e))
 
 async def fetch_with_playwright(url: str) -> Optional[str]:
+    """Fetch page using Playwright with human-like behavior."""
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)  # Headless mode
+            browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
-                viewport={'width': 1920, 'height': 1080},
-                # New: Proxy support
+                viewport={'width': random.randint(1280, 1920), 'height': random.randint(720, 1080)},  # Random viewport
+                locale='en-US',
+                timezone_id='Asia/Kolkata',
+                java_script_enabled=True,
+                # Load saved cookies
+                storage_state={'cookies': load_cookies()},
                 proxy={'server': random.choice(PROXY_POOL) if PROXY_POOL else None}
             )
             page = await context.new_page()
+            await stealth_async(page)  # Apply stealth to evade bot detection
             try:
                 if not url.startswith(('http://', 'https://')):
                     url = f'https://{url}'
-                # New: Simulate human behavior
+                
+                # Human-like navigation: Start from homepage or referer
+                parsed = urlparse(url)
+                homepage = f"{parsed.scheme}://{parsed.netloc}"
+                await page.goto(homepage, timeout=TIMEOUT*1000, wait_until="domcontentloaded")
+                await asyncio.sleep(random.uniform(2, 5))  # Random delay like a user
+                
+                # Simulate mouse movement
+                await page.mouse.move(random.randint(100, 500), random.randint(100, 500))
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
+                await asyncio.sleep(random.uniform(1, 3))
+                
+                # Navigate to target URL
                 await page.goto(url, timeout=TIMEOUT*1000, wait_until="networkidle")
-                # Random scroll to mimic user
+                await asyncio.sleep(random.uniform(2, 5))
+                
+                # Simulate more human interaction
+                await page.mouse.move(random.randint(200, 600), random.randint(200, 600))
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-                await asyncio.sleep(random.uniform(1, 3))  # Random delay
+                await asyncio.sleep(random.uniform(1, 4))
+                
+                # Check for captchas
                 content = await page.content()
-                # New: Check for captcha
-                if "captcha" in content.lower() or "verify you are not a robot" in content.lower():
-                    logger.warning(f"Captcha detected on {url}")
+                if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
+                    logger.warning(f"Captcha detected on {url}. Solve manually in Chrome or use a captcha-solving service.")
                     return None
+                
+                # Save cookies for next session
+                cookies = await context.cookies()
+                save_cookies(cookies)
+                
                 await browser.close()
                 return content
             except Exception as e:
@@ -209,27 +262,28 @@ async def fetch_with_playwright(url: str) -> Optional[str]:
         return None
 
 async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) -> Optional[str]:
+    """Fetch page with aiohttp, falling back to Playwright if needed."""
     if not url.startswith(('http://', 'https://')):
         url = f'https://{url}'
-    # New: Enhanced headers
     headers = {
         'User-Agent': random.choice(USER_AGENTS),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',  # Added Hindi for Indian websites
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
-        'Referer': 'https://www.google.com/',
-        'DNT': '1',
         'Sec-Fetch-Dest': 'document',
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'none',
         'Sec-Fetch-User': '?1',
         'Cache-Control': 'max-age=0',
+        'Referer': 'https://www.google.com/',
+        'DNT': '1',
+        # Add manual cookies if needed (e.g., from Chrome DevTools)
+        # 'Cookie': 'session_id=abc123; user_prefs=xyz789',
     }
     for attempt in range(1, RETRIES + 1):
         try:
-            # New: Proxy support
             proxy = random.choice(PROXY_POOL) if PROXY_POOL else None
             if session:
                 async with session.get(
@@ -239,27 +293,30 @@ async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) 
                     proxy=proxy
                 ) as response:
                     if response.status == 403:
-                        raise Exception("403 Forbidden - Switching to Playwright")
+                        logger.warning(f"403 Forbidden on {url}, switching to Playwright")
+                        break  # Switch to Playwright immediately
                     elif response.status == 429:
-                        retry_after = int(response.headers.get('Retry-After', 5))
+                        retry_after = int(response.headers.get('Retry-After', 10))
                         logger.warning(f"429 Rate Limit on {url}, retrying after {retry_after}s")
                         await asyncio.sleep(retry_after)
                         continue
                     response.raise_for_status()
                     content = await response.text(encoding='utf-8', errors='ignore')
-                    # New: Check for captcha
-                    if "captcha" in content.lower() or "verify you are not a robot" in content.lower():
-                        logger.warning(f"Captcha detected on {url}")
-                        return None
+                    if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
+                        logger.warning(f"Captcha detected on {url}. Switching to Playwright.")
+                        break
                     if len(content) > 1000:
                         return content
-            playwright_content = await fetch_with_playwright(url)
-            if playwright_content:
-                return playwright_content
-            await asyncio.sleep(2 ** attempt)
         except Exception as e:
             logger.warning(f"Attempt {attempt} failed for URL: {url}", error=str(e))
             await asyncio.sleep(2 ** attempt)
+        
+        # Fallback to Playwright
+        playwright_content = await fetch_with_playwright(url)
+        if playwright_content:
+            return playwright_content
+        await asyncio.sleep(2 ** attempt)
+    
     logger.error(f"All attempts failed for URL: {url}")
     return None
 
