@@ -4,24 +4,18 @@ import sqlite3
 import os
 import re
 import random
-import time
-import warnings
 import asyncio
 import aiohttp
 from datetime import datetime, timedelta
-from typing import Optional, List, Tuple, Dict, Set
+from typing import Optional, List, Dict
 from bs4 import BeautifulSoup
 from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 import structlog
 from playwright.async_api import async_playwright
-from url import URLS  # Import URLs from url.py
+from url import URLS  # Import URLs from url.py file
 
-# Suppress unnecessary warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
-
-# Configure structured logging
+# Configure structured logging without emojis
 structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
@@ -39,12 +33,12 @@ logger = structlog.get_logger()
 config = configparser.ConfigParser()
 config.read('config.ini')
 
-# Load environment variables
+# Load environment variables (works with GitHub secrets)
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
 
-# Configuration defaults (excluding URLs since they come from url.py)
+# Configuration defaults
 DEFAULT_CONFIG = {
     'timeout': 60,
     'retries': 3,
@@ -58,7 +52,7 @@ DEFAULT_CONFIG = {
     'notification_age_days': 30
 }
 
-# Initialize configuration (excluding URL related settings)
+# Initialize configuration
 TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=DEFAULT_CONFIG['timeout']))
 RETRIES = int(config.get('DEFAULT', 'retries', fallback=DEFAULT_CONFIG['retries']))
 KEYWORDS = [k.strip() for k in config.get('DEFAULT', 'keywords', fallback=DEFAULT_CONFIG['keywords']).split(',')]
@@ -78,7 +72,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
 ]
 
-# Initialize database
 def init_db():
     """Initialize SQLite database for tracking sent notifications."""
     try:
@@ -95,7 +88,7 @@ def init_db():
             conn.execute('CREATE INDEX IF NOT EXISTS idx_content_hash ON notifications(content_hash)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_sent_at ON notifications(sent_at)')
             conn.commit()
-        logger.info("Database initialized", db_file=SENT_POSTS_DB)
+        logger.info("Database initialized successfully")
     except sqlite3.Error as e:
         logger.error("Database initialization failed", error=str(e))
         raise
@@ -107,7 +100,7 @@ def cleanup_old_entries():
             cutoff_date = (datetime.now() - timedelta(days=NOTIFICATION_AGE_DAYS)).strftime('%Y-%m-%d')
             conn.execute("DELETE FROM notifications WHERE sent_at < ?", (cutoff_date,))
             conn.commit()
-            logger.info("Cleaned up old database entries", cutoff_date=cutoff_date)
+        logger.info("Old database entries cleaned up")
     except sqlite3.Error as e:
         logger.error("Database cleanup failed", error=str(e))
 
@@ -130,12 +123,15 @@ def mark_notification_sent(url: str, notification_id: str, content_hash: str):
                 (notification_id, url, content_hash)
             )
             conn.commit()
-        logger.debug("Notification marked as sent", id=notification_id)
+        logger.debug("Notification marked as sent in database")
     except sqlite3.Error as e:
         logger.error("Failed to mark notification as sent", error=str(e))
 
 async def fetch_with_playwright(url: str) -> Optional[str]:
-    """Fetch page content using Playwright for JavaScript-heavy sites."""
+    """
+    Fetch page content using Playwright for JavaScript-heavy sites.
+    This helps bypass 403 Forbidden errors by simulating real browser.
+    """
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
@@ -146,6 +142,10 @@ async def fetch_with_playwright(url: str) -> Optional[str]:
             page = await context.new_page()
             
             try:
+                # Prepend https:// if missing
+                if not url.startswith(('http://', 'https://')):
+                    url = f'https://{url}'
+                
                 await page.goto(url, timeout=TIMEOUT*1000, wait_until="networkidle")
                 content = await page.content()
                 await browser.close()
@@ -159,25 +159,48 @@ async def fetch_with_playwright(url: str) -> Optional[str]:
         return None
 
 async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) -> Optional[str]:
-    """Fetch page content with retries and fallback methods."""
+    """
+    Fetch page content with retries and fallback methods.
+    Handles both direct URL access and https:// prefixed URLs.
+    """
+    # Prepare proper URL format
+    if not url.startswith(('http://', 'https://')):
+        url = f'https://{url}'
+    
+    # Enhanced headers to prevent 403 Forbidden
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
+    }
+    
     for attempt in range(1, RETRIES + 1):
         try:
-            # Try with aiohttp first
+            # First try with aiohttp
             if session:
-                headers = {'User-Agent': random.choice(USER_AGENTS)}
                 async with session.get(url, headers=headers, timeout=TIMEOUT) as response:
+                    if response.status == 403:
+                        # If forbidden, try with Playwright immediately
+                        raise Exception("403 Forbidden - Switching to Playwright")
                     response.raise_for_status()
-                    content = await response.text()
-                    if len(content) > 1000:  # Basic check for valid content
+                    content = await response.text(encoding='utf-8', errors='ignore')
+                    if len(content) > 1000:
                         return content
             
-            # Fallback to Playwright if aiohttp fails or not available
+            # Fallback to Playwright
             playwright_content = await fetch_with_playwright(url)
             if playwright_content:
                 return playwright_content
             
-            logger.warning(f"Attempt {attempt} failed for URL: {url}")
-            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            await asyncio.sleep(2 ** attempt)
             
         except Exception as e:
             logger.warning(f"Attempt {attempt} failed for URL: {url}", error=str(e))
@@ -187,7 +210,7 @@ async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) 
     return None
 
 def extract_dates(text: str) -> List[datetime]:
-    """Extract all possible dates from text."""
+    """Extract all possible dates from notification text."""
     if not text:
         return []
     
@@ -206,7 +229,7 @@ def extract_dates(text: str) -> List[datetime]:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             try:
                 dt = date_parse(match.group(0), dayfirst=True, yearfirst=True)
-                if 2000 <= dt.year <= datetime.now().year + 1:  # Reasonable year range
+                if 2000 <= dt.year <= datetime.now().year + 1:
                     dates.append(dt)
             except ValueError:
                 continue
@@ -293,21 +316,24 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
     
     return notifications
 
-async def send_telegram_notification(message: str, url: str) -> bool:
-    """Send notification to Telegram."""
+async def send_telegram_notification(notification: Dict[str, str], url: str) -> bool:
+    """
+    Send notification to Telegram.
+    Works with GitHub secrets when properly configured.
+    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("Telegram credentials not configured")
         return False
     
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
-    # Format message with Markdown
+    # Format message without emojis
     formatted_msg = (
-        f"*🔔 New Notification*\n\n"
-        f"*📌 Source:* [{url}]({url})\n"
-        f"*📅 Date:* {message['date']}\n\n"
-        f"*📝 Content:*\n{message['text']}\n\n"
-        f"*🔗 [View Original]({url})*"
+        f"New Notification\n\n"
+        f"Source: {url}\n"
+        f"Date: {notification['date']}\n\n"
+        f"Content:\n{notification['text']}\n\n"
+        f"View Original: {url}"
     )
     
     payload = {
@@ -372,11 +398,16 @@ if __name__ == "__main__":
     # Set logging level
     logging.basicConfig(level=args.log_level)
     
+    # Verify Telegram credentials
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.error("Telegram credentials not found. Please set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID environment variables.")
+        exit(1)
+    
     # Use URLs from command line if provided, otherwise from url.py
     urls_to_monitor = args.urls if args.urls else URLS
     
     if not urls_to_monitor:
-        logger.error("No URLs provided to monitor - please add URLs in url.py or use --urls argument")
+        logger.error("No URLs provided to monitor")
         exit(1)
     
     logger.info(f"Starting monitoring for {len(urls_to_monitor)} URLs")
