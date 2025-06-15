@@ -3,24 +3,22 @@ import logging
 import sqlite3
 import os
 import re
-import time
 import random
+import time
+import warnings
 import asyncio
 import aiohttp
-from datetime import datetime
-from typing import Optional, List, Tuple
+from datetime import datetime, timedelta
+from typing import Optional, List, Tuple, Dict, Set
 from bs4 import BeautifulSoup
-from charset_normalizer import detect
 from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 import structlog
-import scrapy
-from scrapy.crawler import CrawlerProcess
-from scrapy.http import HtmlResponse
-from transformers import pipeline
-from sentence_transformers import SentenceTransformer, util
-from sklearn.ensemble import RandomForestClassifier
-from url import URLS  # List of URLs to monitor
+from playwright.async_api import async_playwright
+
+# Suppress unnecessary warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # Configure structured logging
 structlog.configure(
@@ -42,335 +40,347 @@ config.read('config.ini')
 
 # Load environment variables
 load_dotenv()
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Configuration defaults
-TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=120))  # 120s
-RETRIES = int(config.get('DEFAULT', 'retries', fallback=3))
+DEFAULT_CONFIG = {
+    'timeout': 60,
+    'retries': 3,
+    'keywords': "recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key",
+    'exclude_words': "home,about us,contact,main navigation,menu,privacy policy,disclaimer",
+    'db_file': "sent_notifications.db",
+    'max_notifications': 5,
+    'min_notification_length': 20,
+    'max_notification_length': 1000,
+    'similarity_threshold': 0.9,
+    'notification_age_days': 30
+}
+
+# Initialize configuration
+TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=DEFAULT_CONFIG['timeout']))
+RETRIES = int(config.get('DEFAULT', 'retries', fallback=DEFAULT_CONFIG['retries']))
+KEYWORDS = [k.strip() for k in config.get('DEFAULT', 'keywords', fallback=DEFAULT_CONFIG['keywords']).split(',')]
+EXCLUDE_WORDS = [w.strip() for w in config.get('DEFAULT', 'exclude_words', fallback=DEFAULT_CONFIG['exclude_words']).split(',')]
+SENT_POSTS_DB = config.get('DEFAULT', 'db_file', fallback=DEFAULT_CONFIG['db_file']))
+MAX_NOTIFICATIONS_PER_URL = int(config.get('DEFAULT', 'max_notifications', fallback=DEFAULT_CONFIG['max_notifications']))
+MIN_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'min_notification_length', fallback=DEFAULT_CONFIG['min_notification_length']))
+MAX_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'max_notification_length', fallback=DEFAULT_CONFIG['max_notification_length']))
+SIMILARITY_THRESHOLD = float(config.get('DEFAULT', 'similarity_threshold', fallback=DEFAULT_CONFIG['similarity_threshold']))
+NOTIFICATION_AGE_DAYS = int(config.get('DEFAULT', 'notification_age_days', fallback=DEFAULT_CONFIG['notification_age_days']))
+
+# User Agents for request rotation
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
 ]
-KEYWORDS = config.get('DEFAULT', 'keywords', fallback="recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key").split(',')
-EXCLUDE_WORDS = ["home", "about us", "contact", "main navigation", "menu"]
-SENT_POSTS_DB = config.get('DEFAULT', 'sent_posts_db', fallback="sent_messages.db")
-MAX_NOTIFICATIONS_PER_URL = int(config.get('DEFAULT', 'max_notifications_per_url', fallback=10))
 
-# AI model initialization
-classifier = pipeline("text-classification", model="distilbert-base-uncased")  # NLP for notification filtering
-sentence_model = SentenceTransformer('all-MiniLM-L6-v2')  # Semantic duplicate detection
-failure_model = RandomForestClassifier()  # Placeholder: train on failure data
-sent_embeddings = {}  # Cache for duplicate detection
-
-# Validate environment variables
-if not TOKEN or not CHAT_ID:
-    logger.error("Missing Telegram TOKEN or CHAT_ID", token_set=bool(TOKEN), chat_id_set=bool(CHAT_ID))
-    exit(1)
-else:
-    logger.info("Telegram configured", chat_id=CHAT_ID, token_prefix=TOKEN[:5] + "***")
-
+# Initialize database
 def init_db():
-    """Initialize SQLite database for sent notifications."""
+    """Initialize SQLite database for tracking sent notifications."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
-            conn.execute('CREATE TABLE IF NOT EXISTS notifications (id TEXT PRIMARY KEY, sent_at TIMESTAMP)')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    notified BOOLEAN DEFAULT TRUE
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_content_hash ON notifications(content_hash)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_sent_at ON notifications(sent_at)')
             conn.commit()
-        logger.info("Initialized SQLite DB", db_file=SENT_POSTS_DB)
+        logger.info("Database initialized", db_file=SENT_POSTS_DB)
     except sqlite3.Error as e:
-        logger.error("Failed to initialize SQLite DB", error=str(e))
-        exit(1)
+        logger.error("Database initialization failed", error=str(e))
+        raise
 
-def check_db_integrity():
-    """Check and repair SQLite database integrity."""
+def cleanup_old_entries():
+    """Remove old entries from the database."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
-            conn.execute("PRAGMA integrity_check")
-            conn.execute("DELETE FROM notifications WHERE id IN (SELECT id FROM notifications GROUP BY id HAVING COUNT(*) > 1)")
+            cutoff_date = (datetime.now() - timedelta(days=NOTIFICATION_AGE_DAYS)).strftime('%Y-%m-%d')
+            conn.execute("DELETE FROM notifications WHERE sent_at < ?", (cutoff_date,))
             conn.commit()
-        logger.info("Checked SQLite DB integrity", db_file=SENT_POSTS_DB)
+            logger.info("Cleaned up old database entries", cutoff_date=cutoff_date)
     except sqlite3.Error as e:
-        logger.error("SQLite DB integrity check failed", error=str(e))
+        logger.error("Database cleanup failed", error=str(e))
 
-def load_sent_posts() -> set:
-    """Load sent notification IDs from SQLite."""
+def is_notification_sent(content_hash: str) -> bool:
+    """Check if a notification with this content hash has already been sent."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
-            cursor = conn.execute('SELECT id FROM notifications')
-            sent = {row[0] for row in cursor.fetchall()}
-        logger.info("Loaded sent notifications", count=len(sent))
-        return sent
+            cursor = conn.execute("SELECT 1 FROM notifications WHERE content_hash = ? LIMIT 1", (content_hash,))
+            return cursor.fetchone() is not None
     except sqlite3.Error as e:
-        logger.error("Failed to load sent notifications", error=str(e))
-        return set()
+        logger.error("Failed to check notification status", error=str(e))
+        return False
 
-def save_sent_post(notification_id: str):
-    """Save a notification ID to SQLite."""
+def mark_notification_sent(url: str, notification_id: str, content_hash: str):
+    """Mark a notification as sent in the database."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
-            conn.execute('INSERT OR IGNORE INTO notifications (id, sent_at) VALUES (?, ?)',
-                         (notification_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            conn.execute(
+                "INSERT OR IGNORE INTO notifications (id, url, content_hash) VALUES (?, ?, ?)",
+                (notification_id, url, content_hash)
+            )
             conn.commit()
-        logger.info("Saved notification ID", id=notification_id)
+        logger.debug("Notification marked as sent", id=notification_id)
     except sqlite3.Error as e:
-        logger.error("Failed to save notification ID", id=notification_id, error=str(e))
+        logger.error("Failed to mark notification as sent", error=str(e))
 
-async def send_telegram(message: str, url: str) -> bool:
-    """Send a message to Telegram without escaping text or date."""
-    telegram_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    lines = message.split('\n')
-    formatted_lines = [lines[0]]  # *New Notification*
-    formatted_lines.append("")  # Blank line
-    for line in lines[2:]:
-        if line.startswith("Website:"):
-            formatted_lines.append(f"Website: {url}")
-        else:
-            formatted_lines.append(line)
-    formatted_message = "\n".join(formatted_lines)[:4096]
-    data = {
-        "chat_id": CHAT_ID,
-        "text": formatted_message,
-        "parse_mode": "Markdown"
-    }
-    async with aiohttp.ClientSession() as session:
-        for attempt in range(1, 4):
+async def fetch_with_playwright(url: str) -> Optional[str]:
+    """Fetch page content using Playwright for JavaScript-heavy sites."""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            context = await browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                viewport={'width': 1920, 'height': 1080}
+            )
+            page = await context.new_page()
+            
             try:
-                async with session.post(telegram_url, json=data, timeout=30) as resp:
-                    resp.raise_for_status()
-                    logger.info("Telegram message sent", message=formatted_message[:50], url=url)
-                    await asyncio.sleep(1.0)
-                    return True
-            except aiohttp.ClientError as e:
-                logger.warning("Telegram send failed", attempt=attempt, error=str(e))
-                await asyncio.sleep(2 ** attempt)
-    logger.error("Failed to send Telegram message after retries", message=formatted_message[:50], url=url)
-    return False
-
-async def send_failure_alert(failed_urls: List[str]):
-    """Send a Telegram alert for failed URLs if >50% fail."""
-    if not failed_urls or len(failed_urls) < len(URLS) * 0.5:
-        return
-    message = f"*Critical Alert*\n\nMore than 50% of URLs failed to fetch:\n" + "\n".join(failed_urls[:10]) + \
-              f"\n\nTotal failed: {len(failed_urls)}/{len(URLS)}. Check logs for details."
-    await send_telegram(message, "N/A")
-
-async def fetch_page_async(url: str, session: aiohttp.ClientSession) -> Optional[str]:
-    """Fetch HTML content asynchronously with retries and User-Agent rotation."""
-    for attempt in range(1, RETRIES + 1):
-        headers = {"User-Agent": random.choice(USER_AGENTS)}
-        try:
-            async with session.get(url, headers=headers, timeout=TIMEOUT, ssl=False) as resp:
-                resp.raise_for_status()
-                text = await resp.text(encoding='utf-8', errors='ignore')
-                logger.info("Fetched page", url=url, attempt=attempt)
-                await asyncio.sleep(2)
-                return text
-        except aiohttp.ClientError as e:
-            logger.warning("Failed to fetch URL", url=url, attempt=attempt, error=str(e))
-            # Placeholder: Predict failure type
-            failure_type = 'retry'  # Train failure_model on real data
-            if failure_type == 'unrecoverable' or attempt == RETRIES:
-                logger.error("Exhausted retries for URL", url=url, error=str(e))
+                await page.goto(url, timeout=TIMEOUT*1000, wait_until="networkidle")
+                content = await page.content()
+                await browser.close()
+                return content
+            except Exception as e:
+                logger.warning("Playwright navigation failed", url=url, error=str(e))
+                await browser.close()
                 return None
+    except Exception as e:
+        logger.error("Playwright initialization failed", error=str(e))
+        return None
+
+async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) -> Optional[str]:
+    """Fetch page content with retries and fallback methods."""
+    for attempt in range(1, RETRIES + 1):
+        try:
+            # Try with aiohttp first
+            if session:
+                headers = {'User-Agent': random.choice(USER_AGENTS)}
+                async with session.get(url, headers=headers, timeout=TIMEOUT) as response:
+                    response.raise_for_status()
+                    content = await response.text()
+                    if len(content) > 1000:  # Basic check for valid content
+                        return content
+            
+            # Fallback to Playwright if aiohttp fails or not available
+            playwright_content = await fetch_with_playwright(url)
+            if playwright_content:
+                return playwright_content
+            
+            logger.warning(f"Attempt {attempt} failed for URL: {url}")
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            
+        except Exception as e:
+            logger.warning(f"Attempt {attempt} failed for URL: {url}", error=str(e))
             await asyncio.sleep(2 ** attempt)
+    
+    logger.error(f"All attempts failed for URL: {url}")
     return None
 
-def fetch_page_dynamic(url: str) -> Optional[str]:
-    """Fetch HTML content for dynamic pages using Scrapy."""
-    class NotificationSpider(scrapy.Spider):
-        name = 'notification'
-        start_urls = [url]
-        def parse(self, response):
-            return {'html': response.text}
-    process = CrawlerProcess(settings={
-        'USER_AGENT': random.choice(USER_AGENTS),
-        'DOWNLOAD_TIMEOUT': TIMEOUT,
-        'PLAYWRIGHT_ENABLED': True,
-    })
-    result = []
-    def collect_result(spider, item):
-        result.append(item)
-    process.crawl(NotificationSpider, callback=collect_result)
-    process.start()
-    return result[0]['html'] if result else None
-
-def extract_date_from_text(text: str) -> Optional[datetime]:
-    """Extract a date from text with relaxed patterns."""
+def extract_dates(text: str) -> List[datetime]:
+    """Extract all possible dates from text."""
     if not text:
-        return None
+        return []
+    
     month_names = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
-    date_patterns = [
-        r'\b(\d{1,2}[-/\s]\d{1,2}[-/\s]\d{4})\b',
-        r'\b(\d{4}[-/\s]\d{1,2}[-/\s]\d{1,2})\b',
+    patterns = [
+        rf'\b(\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}})\b',
         rf'\b(\d{{1,2}}\s+{month_names}\s+\d{{4}})\b',
-        rf'\b(\d{{1,2}}(?:st|nd|rd|th)?\s+{month_names}\s+\d{{4}})\b',
-        rf'\b(\d{{1,2}}-{month_names}-\d{{4}})\b',
-        rf'\b({month_names}\s+\d{{1,2}},?\s+\d{{4}})\b',
-        r'\b(\d{4}/\d{2}/\d{2})\b',
-        r'\b(\d{2}/\d{2}/\d{4})\b',
+        rf'\b({month_names}\s+\d{{1,2}}(?:st|nd|rd|th)?\s+\d{{4}})\b',
+        rf'\b({month_names}\s+\d{{4}})\b',
+        rf'\b(\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}})\b',
+        rf'\b(\d{{1,2}}\s+{month_names}\s+\d{{4}})\b',
     ]
-    for pattern in date_patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
+    
+    dates = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
             try:
-                dt = date_parse(match.group(0), dayfirst=True)
-                if 2000 <= dt.year <= datetime.now().year + 1:
-                    logger.debug("Extracted date", date=dt, text=text[:50])
-                    return dt
+                dt = date_parse(match.group(0), dayfirst=True, yearfirst=True)
+                if 2000 <= dt.year <= datetime.now().year + 1:  # Reasonable year range
+                    dates.append(dt)
             except ValueError:
                 continue
-    text_lower = text.lower()
-    now = datetime.now()
-    if f"{now.strftime('%B').lower()} {now.year}" in text_lower or f"{now.strftime('%m')}/{now.year}" in text_lower:
-        dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        logger.debug("Assigned fallback date", date=dt, text=text[:50])
-        return dt
-    logger.debug("No valid date found", text=text[:50])
-    return None
+    
+    return dates
 
-def is_notification(text: str) -> bool:
-    """Check if text is a valid notification using NLP."""
-    if not text or len(text) < 20 or len(text) > 500:
+def is_relevant_notification(text: str) -> bool:
+    """Check if text contains relevant notification keywords."""
+    if not text or len(text) < MIN_NOTIFICATION_LENGTH or len(text) > MAX_NOTIFICATION_LENGTH:
         return False
+    
     text_lower = text.lower()
-    if any(word in text_lower for word in EXCLUDE_WORDS):
+    
+    # Check for excluded words
+    if any(exclude_word.lower() in text_lower for exclude_word in EXCLUDE_WORDS):
         return False
-    result = classifier(text[:512])[0]
-    logger.debug("NLP classification", text=text[:50], label=result['label'], score=result['score'])
-    return result['label'] == 'POSITIVE' and result['score'] > 0.7
+    
+    # Check for keywords
+    if any(keyword.lower() in text_lower for keyword in KEYWORDS):
+        return True
+    
+    # Check for common notification patterns
+    notification_phrases = [
+        'last date',
+        'apply online',
+        'registration',
+        'download',
+        'published',
+        'advertisement',
+        'announcement',
+        'circular',
+        'notice'
+    ]
+    return any(phrase in text_lower for phrase in notification_phrases)
 
-def normalize_text(text: str) -> str:
-    """Normalize text for duplicate checking using semantic similarity."""
-    text = ''.join(c for c in text if c.isprintable())
-    text = re.sub(r'\s+', ' ', text.strip()).lower()
-    embedding = sentence_model.encode(text)
-    for cached_id, cached_emb in sent_embeddings.items():
-        if util.cos_sim(embedding, cached_emb) > 0.95:
-            logger.debug("Found duplicate", text=text[:50], cached_id=cached_id)
-            return cached_id
-    sent_embeddings[text] = embedding
-    return text
+def generate_content_hash(text: str) -> str:
+    """Generate a consistent hash for notification content."""
+    normalized = re.sub(r'\s+', ' ', text.strip().lower())
+    return str(hash(normalized))
 
-def parse_notifications(url: str, html: str, sent_posts: set) -> List[Tuple[str, str]]:
-    """Parse HTML for new notifications in the current month."""
-    logger.info("Processing URL", url=url)
+def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
+    """Extract potential notifications from HTML content."""
     if not html:
-        logger.error("No HTML content fetched, skipping notifications", url=url)
         return []
-
+    
     soup = BeautifulSoup(html, 'html.parser')
     notifications = []
-    now = datetime.now()
-    current_year, current_month = now.year, now.month
-    logger.info("Filtering notifications for current month", year=current_year, month=current_month)
-
-    notification_count = 0
-    for element in soup.find_all(['li', 'p', 'a']):
-        text = element.get_text(strip=True)
-        if not is_notification(text):
-            logger.debug("Skipping non-notification text", text=text[:50])
+    
+    # Look for common notification containers
+    selectors = [
+        'li', 'p', 'div.notification', 'div.news-item', 
+        'div.announcement', 'a[href*="notification"]',
+        'a[href*="circular"]', 'a[href*="advertisement"]'
+    ]
+    
+    for element in soup.select(', '.join(selectors)):
+        text = element.get_text(' ', strip=True)
+        if not is_relevant_notification(text):
             continue
-
-        normalized_text = normalize_text(text)
-        if not normalized_text:
-            continue
-
-        notification_id = f"{url}:{hash(normalized_text)}".lower()
-        if notification_id in sent_posts:
-            logger.info("Skipping duplicate notification", id=notification_id, text=text[:50])
-            continue
-
-        date = None
-        candidates = [text]
-        time_tag = element.find('time') or element.find_parent('time') or element.find_next('time')
-        if time_tag:
-            candidates.append(time_tag.get_text(strip=True))
-            if time_tag.get('datetime'):
-                candidates.append(time_tag.get('datetime'))
-        for candidate in candidates:
-            dt = extract_date_from_text(candidate)
-            if dt:
-                date = dt
-                break
-
-        if date and date.year == current_year and date.month == current_month:
-            text_lower = text.lower()
-            month_str = date.strftime('%B').lower()[:3]
-            if month_str in text_lower or date.strftime('%m') in text_lower:
-                msg = f"*New Notification*\n\n"
-                msg += f"Website: {url}\n"
-                msg += f"Text: {text}\n"
-                msg += f"Date: {date.strftime('%Y-%m-%d')}\n"
-                notifications.append((notification_id, msg))
-                notification_count += 1
-                if notification_count >= MAX_NOTIFICATIONS_PER_URL:
-                    logger.info("Reached max notifications for URL", url=url, max=MAX_NOTIFICATIONS_PER_URL)
-                    break
-            else:
-                logger.debug("Skipping notification with mismatched month in text", text=text[:50], date=date)
-        else:
-            logger.debug("Skipping notification not in current month", text=text[:50], date=date)
-
-    logger.info("Found notifications", url=url, count=len(notifications))
+        
+        # Extract dates
+        dates = extract_dates(text)
+        recent_dates = [dt for dt in dates if dt >= datetime.now() - timedelta(days=NOTIFICATION_AGE_DAYS)]
+        
+        if not recent_dates and not dates:
+            continue  # No dates or only old dates
+            
+        most_recent_date = max(recent_dates) if recent_dates else max(dates) if dates else None
+        
+        # Generate unique ID and content hash
+        content_hash = generate_content_hash(text)
+        notification_id = f"{url}:{content_hash}"
+        
+        notifications.append({
+            'id': notification_id,
+            'url': url,
+            'text': text,
+            'date': most_recent_date.strftime('%Y-%m-%d') if most_recent_date else 'No date',
+            'content_hash': content_hash
+        })
+        
+        if len(notifications) >= MAX_NOTIFICATIONS_PER_URL:
+            break
+    
     return notifications
 
-async def main(urls: List[str] = URLS):
-    """Monitor URLs for new notifications and send to Telegram."""
+async def send_telegram_notification(message: str, url: str) -> bool:
+    """Send notification to Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.error("Telegram credentials not configured")
+        return False
+    
+    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
+    # Format message with Markdown
+    formatted_msg = (
+        f"*🔔 New Notification*\n\n"
+        f"*📌 Source:* [{url}]({url})\n"
+        f"*📅 Date:* {message['date']}\n\n"
+        f"*📝 Content:*\n{message['text']}\n\n"
+        f"*🔗 [View Original]({url})*"
+    )
+    
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': formatted_msg,
+        'parse_mode': 'Markdown',
+        'disable_web_page_preview': True
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(telegram_url, json=payload, timeout=30) as response:
+                if response.status == 200:
+                    return True
+                logger.error(f"Telegram API error: {await response.text()}")
+                return False
+    except Exception as e:
+        logger.error(f"Failed to send Telegram message: {str(e)}")
+        return False
+
+async def monitor_urls(urls: List[str]):
+    """Monitor a list of URLs for new notifications."""
     init_db()
-    check_db_integrity()
-    logger.info("Monitoring started", total_urls=len(urls))
-    sent_posts = load_sent_posts()
-    failed_urls = []
-
+    cleanup_old_entries()
+    
     async with aiohttp.ClientSession() as session:
-        tasks = []
-        for url in urls:
-            if not url:
-                logger.error("Empty URL, skipping")
-                continue
-            if not url.startswith(('http://', 'https://')):
-                url = f"https://{url}"
-                logger.info("Prepended https:// to URL", url=url)
-            tasks.append(fetch_page_async(url, session))
+        tasks = [fetch_page(url, session) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-
+        
         for url, html in zip(urls, results):
-            if html is None:
-                # Try dynamic fetch for failed URLs
-                logger.info("Attempting dynamic fetch", url=url)
-                html = fetch_page_dynamic(url)
-                if html is None:
-                    failed_urls.append(url)
-                    continue
+            if isinstance(html, Exception):
+                logger.error(f"Failed to fetch URL: {url}", error=str(html))
+                continue
+            
             try:
-                notifications = parse_notifications(url, html, sent_posts)
-                for notification_id, message in notifications:
-                    sent_posts.add(notification_id)
-                    if await send_telegram(message, url):
-                        save_sent_post(notification_id)
-                        logger.info("Sent notification", id=notification_id, message=message[:50], url=url)
+                notifications = extract_notifications(url, html)
+                for notification in notifications:
+                    if is_notification_sent(notification['content_hash']):
+                        continue
+                    
+                    if await send_telegram_notification(notification, url):
+                        mark_notification_sent(url, notification['id'], notification['content_hash'])
+                        logger.info(f"Sent notification: {notification['id']}")
                     else:
-                        logger.error("Failed to send notification", id=notification_id, url=url)
-                        sent_posts.remove(notification_id)
+                        logger.error(f"Failed to send notification: {notification['id']}")
+                        
+                    await asyncio.sleep(1)  # Rate limiting
+                    
             except Exception as e:
-                logger.error("Error processing URL", url=url, error=str(e))
-                failed_urls.append(url)
-            await asyncio.sleep(2)
+                logger.error(f"Error processing URL: {url}", error=str(e))
 
-    if failed_urls:
-        logger.warning("Summary of failed URLs", failed_count=len(failed_urls), total_urls=len(urls), failed_urls=failed_urls)
-        await send_failure_alert(failed_urls)
-    else:
-        logger.info("All URLs processed successfully", total_urls=len(urls))
-
-if __name__ == "__module__":
+if __name__ == "__main__":
     import argparse
+    
     parser = argparse.ArgumentParser(description="Website Notification Monitor")
-    parser.add_argument('--urls', nargs='+', default=URLS, help="URLs to monitor")
+    parser.add_argument('--urls', nargs='+', help="URLs to monitor")
+    parser.add_argument('--config', default='config.ini', help="Configuration file path")
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help="Logging level")
+    
     args = parser.parse_args()
-
-    logging.getLogger().setLevel(args.log_level)
-    asyncio.run(main(args.urls))
+    
+    # Set logging level
+    logging.basicConfig(level=args.log_level)
+    
+    # Load URLs from config if not provided
+    urls_to_monitor = args.urls
+    if not urls_to_monitor:
+        config.read(args.config)
+        urls_to_monitor = config.get('DEFAULT', 'urls', fallback="").split(',')
+        urls_to_monitor = [url.strip() for url in urls_to_monitor if url.strip()]
+    
+    if not urls_to_monitor:
+        logger.error("No URLs provided to monitor")
+        exit(1)
+    
+    logger.info(f"Starting monitoring for {len(urls_to_monitor)} URLs")
+    asyncio.run(monitor_urls(urls_to_monitor))
