@@ -8,6 +8,7 @@ playwright>=1.22.0
 structlog>=21.5.0
 brotli
 sentence-transformers
+playwright-stealth
 
 # Additional NLP Processing (optional)
 transformers>=4.19.0
