@@ -7,14 +7,16 @@ import random
 import asyncio
 import aiohttp
 import ssl
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from bs4 import BeautifulSoup
 from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 import structlog
 from playwright.async_api import async_playwright
 from sentence_transformers import SentenceTransformer, util
+from urllib.parse import urljoin, urlparse
 from url import URLS  # Import URLs from url.py file
 
 # Configure structured logging without emojis
@@ -51,7 +53,13 @@ DEFAULT_CONFIG = {
     'min_notification_length': 20,
     'max_notification_length': 1000,
     'similarity_threshold': 0.85,
-    'notification_age_days': 30
+    'notification_age_days': 30,
+    'rss_timeout': 30,
+    'sitemap_timeout': 30,
+    'max_concurrent_requests': 5,
+    'delay_between_requests': 1,
+    'respect_robots': True,
+    'user_agent': 'GovNotificationBot/1.0 (+https://github.com/yourrepo)'
 }
 
 # Initialize configuration
@@ -65,12 +73,19 @@ MIN_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'min_notification_length', f
 MAX_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'max_notification_length', fallback=DEFAULT_CONFIG['max_notification_length']))
 SIMILARITY_THRESHOLD = float(config.get('DEFAULT', 'similarity_threshold', fallback=DEFAULT_CONFIG['similarity_threshold']))
 NOTIFICATION_AGE_DAYS = int(config.get('DEFAULT', 'notification_age_days', fallback=DEFAULT_CONFIG['notification_age_days']))
+RSS_TIMEOUT = int(config.get('DEFAULT', 'rss_timeout', fallback=DEFAULT_CONFIG['rss_timeout']))
+SITEMAP_TIMEOUT = int(config.get('DEFAULT', 'sitemap_timeout', fallback=DEFAULT_CONFIG['sitemap_timeout']))
+MAX_CONCURRENT_REQUESTS = int(config.get('DEFAULT', 'max_concurrent_requests', fallback=DEFAULT_CONFIG['max_concurrent_requests']))
+DELAY_BETWEEN_REQUESTS = int(config.get('DEFAULT', 'delay_between_requests', fallback=DEFAULT_CONFIG['delay_between_requests']))
+RESPECT_ROBOTS = config.getboolean('DEFAULT', 'respect_robots', fallback=DEFAULT_CONFIG['respect_robots']))
+USER_AGENT = config.get('DEFAULT', 'user_agent', fallback=DEFAULT_CONFIG['user_agent'])
 
 # Load sentence transformer model for semantic similarity
 model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
 # User Agents for request rotation
 USER_AGENTS = [
+    USER_AGENT,
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
@@ -431,43 +446,219 @@ async def send_telegram_notification(notification: Dict[str, str], url: str) -> 
     
     return False
 
+async def check_robots_txt(url: str, session: aiohttp.ClientSession) -> Tuple[bool, float]:
+    """
+    Check robots.txt for scraping permissions and crawl delay.
+    Returns (allowed, delay_seconds)
+    """
+    if not RESPECT_ROBOTS:
+        return True, DELAY_BETWEEN_REQUESTS
+    
+    parsed = urlparse(url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    
+    try:
+        async with session.get(robots_url, timeout=10) as response:
+            if response.status == 200:
+                content = await response.text()
+                # Simple check for our user agent
+                if f"User-agent: {USER_AGENT.split('/')[0]}" in content:
+                    if "Disallow: /" in content:
+                        return False, 0
+                    # Find crawl delay
+                    delay_match = re.search(r"Crawl-delay:\s*(\d+)", content)
+                    if delay_match:
+                        return True, float(delay_match.group(1))
+                return True, DELAY_BETWEEN_REQUESTS
+            return True, DELAY_BETWEEN_REQUESTS
+    except Exception:
+        return True, DELAY_BETWEEN_REQUESTS
+
+async def fetch_rss_feed(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
+    """
+    Try to fetch and parse RSS/Atom feed from common endpoints.
+    Returns list of items or None if not found.
+    """
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    
+    # Common RSS feed locations
+    feed_paths = [
+        "/feed",
+        "/rss",
+        "/atom.xml",
+        "/feed.xml",
+        "/rss.xml",
+        "/notifications/feed",
+        "/news/feed"
+    ]
+    
+    for path in feed_paths:
+        feed_url = urljoin(base_url, path)
+        try:
+            async with session.get(feed_url, timeout=RSS_TIMEOUT) as response:
+                if response.status == 200:
+                    content = await response.text()
+                    return parse_feed(content, base_url)
+        except Exception as e:
+            logger.debug(f"Failed to fetch RSS feed at {feed_url}", error=str(e))
+    
+    return None
+
+def parse_feed(content: str, base_url: str) -> List[Dict]:
+    """
+    Parse RSS/Atom feed content into notification items.
+    """
+    items = []
+    try:
+        root = ET.fromstring(content)
+        
+        # RSS format
+        for item in root.findall('.//item') or root.findall('.//entry'):
+            title = item.findtext('title', '').strip()
+            link = item.findtext('link', '').strip()
+            description = item.findtext('description', '') or item.findtext('content:encoded', '') or ''
+            pub_date = item.findtext('pubDate', '') or item.findtext('published', '')
+            
+            if not link.startswith('http'):
+                link = urljoin(base_url, link)
+            
+            if title and link:
+                items.append({
+                    'title': title,
+                    'url': link,
+                    'text': f"{title}\n\n{description}",
+                    'date': pub_date
+                })
+    except Exception as e:
+        logger.error("Failed to parse feed", error=str(e))
+    
+    return items
+
+async def fetch_sitemap(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
+    """
+    Try to fetch and parse sitemap.xml for notification pages.
+    """
+    parsed = urlparse(url)
+    sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
+    
+    try:
+        async with session.get(sitemap_url, timeout=SITEMAP_TIMEOUT) as response:
+            if response.status == 200:
+                content = await response.text()
+                return parse_sitemap(content)
+    except Exception as e:
+        logger.debug(f"Failed to fetch sitemap at {sitemap_url}", error=str(e))
+    
+    return None
+
+def parse_sitemap(content: str) -> List[Dict]:
+    """
+    Parse sitemap.xml content for potential notification URLs.
+    """
+    items = []
+    try:
+        root = ET.fromstring(content)
+        namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+        
+        for url in root.findall('.//ns:url', namespace):
+            loc = url.findtext('ns:loc', '').strip()
+            lastmod = url.findtext('ns:lastmod', '').strip()
+            
+            if loc and any(keyword in loc.lower() for keyword in KEYWORDS):
+                items.append({
+                    'url': loc,
+                    'date': lastmod
+                })
+    except Exception as e:
+        logger.error("Failed to parse sitemap", error=str(e))
+    
+    return items
+
+async def process_url(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
+    """
+    Process a URL through multiple methods with fallback:
+    1. Check robots.txt
+    2. Try RSS/Atom feeds
+    3. Try sitemap.xml
+    4. Fallback to HTML scraping
+    """
+    # Check robots.txt first
+    allowed, delay = await check_robots_txt(url, session)
+    if not allowed:
+        logger.info(f"Skipping {url} due to robots.txt restrictions")
+        return None
+    
+    await asyncio.sleep(delay)  # Respect crawl delay
+    
+    # Try RSS feed first
+    rss_items = await fetch_rss_feed(url, session)
+    if rss_items:
+        logger.debug(f"Found {len(rss_items)} items in RSS feed for {url}")
+        return rss_items
+    
+    # Try sitemap next
+    sitemap_items = await fetch_sitemap(url, session)
+    if sitemap_items:
+        logger.debug(f"Found {len(sitemap_items)} relevant items in sitemap for {url}")
+        return sitemap_items
+    
+    # Fallback to HTML scraping
+    logger.debug(f"Falling back to HTML scraping for {url}")
+    html = await fetch_page(url, session)
+    if html:
+        return extract_notifications(url, html)
+    
+    return None
+
 async def monitor_urls(urls: List[str]):
     """Monitor a list of URLs for new notifications."""
     init_db()
     cleanup_old_entries()
     
+    # Use semaphore to limit concurrent requests
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    
+    async def process_with_semaphore(url):
+        async with semaphore:
+            return await process_url(url, session)
+    
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_page(url, session) for url in urls]
+        tasks = [process_with_semaphore(url) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        for url, html in zip(urls, results):
-            if isinstance(html, Exception):
-                logger.error(f"Failed to fetch URL: {url}", error=str(html))
+        for url, result in zip(urls, results):
+            if isinstance(result, Exception):
+                logger.error(f"Failed to process URL: {url}", error=str(result))
                 continue
-            
-            try:
-                notifications = extract_notifications(url, html)
-                for notification in notifications:
-                    if is_notification_sent(notification['content_hash'], notification['semantic_hash']):
-                        continue
-                    
-                    if await send_telegram_notification(notification, url):
-                        mark_notification_sent(
-                            url=url,
-                            notification_id=notification['id'],
-                            content_hash=notification['content_hash'],
-                            semantic_hash=notification['semantic_hash'],
-                            text=notification['text'],
-                            date=notification['date']
-                        )
-                        logger.info(f"Sent notification: {notification['id']}")
-                    else:
-                        logger.error(f"Failed to send notification: {notification['id']}")
-                        
-                    await asyncio.sleep(1)  # Rate limiting
-                    
-            except Exception as e:
-                logger.error(f"Error processing URL: {url}", error=str(e))
+            elif not result:
+                continue
+                
+            for notification in result:
+                # Generate hashes if not from RSS/sitemap
+                if 'content_hash' not in notification:
+                    text = notification.get('text', notification.get('title', ''))
+                    notification['content_hash'] = generate_content_hash(text)
+                    notification['semantic_hash'] = generate_semantic_hash(text)
+                    notification['id'] = f"{url}:{notification['content_hash']}"
+                
+                if is_notification_sent(notification['content_hash'], notification['semantic_hash']):
+                    continue
+                
+                if await send_telegram_notification(notification, url):
+                    mark_notification_sent(
+                        url=url,
+                        notification_id=notification['id'],
+                        content_hash=notification['content_hash'],
+                        semantic_hash=notification['semantic_hash'],
+                        text=notification.get('text', ''),
+                        date=notification.get('date', 'No date')
+                    )
+                    logger.info(f"Sent notification: {notification['id']}")
+                else:
+                    logger.error(f"Failed to send notification: {notification['id']}")
+                
+                await asyncio.sleep(DELAY_BETWEEN_REQUESTS)
 
 if __name__ == "__main__":
     import argparse
