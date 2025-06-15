@@ -6,6 +6,7 @@ import re
 import random
 import asyncio
 import aiohttp
+import requests
 import json
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -18,6 +19,8 @@ from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
 from sentence_transformers import SentenceTransformer, util
 from urllib.parse import urljoin, urlparse
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 from url import URLS  # Import URLs from url.py file
 
 # Configure structured logging
@@ -55,7 +58,7 @@ COOKIE_FILE = "cookies.json"
 DEFAULT_CONFIG = {
     'timeout': 30,  # Reduced for faster requests
     'retries': 1,  # Minimal retries to avoid flagging
-    'keywords': "recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key,notice,announcement",
+    'keywords': "recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key,notice,announcement,call letter,merit list",
     'exclude_words': "home,about us,contact,main navigation,menu,privacy policy,disclaimer",
     'db_file': "sent_notifications.db",
     'max_notifications': 5,
@@ -75,7 +78,7 @@ DEFAULT_CONFIG = {
 TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=DEFAULT_CONFIG['timeout']))
 RETRIES = int(config.get('DEFAULT', 'retries', fallback=DEFAULT_CONFIG['retries']))
 KEYWORDS = [k.strip() for k in config.get('DEFAULT', 'keywords', fallback=DEFAULT_CONFIG['keywords']).split(',')]
-EXCLUDE_WORDS = [k.strip() for k in config.get('DEFAULT', 'exclude_words', fallback=DEFAULT_CONFIG['exclude_words']).split(',')]
+EXCLUDE_WORDS = [w.strip() for k in config.get('DEFAULT', 'exclude_words', fallback=DEFAULT_CONFIG['exclude_words']).split(',')]
 SENT_POSTS_DB = config.get('DEFAULT', 'db_file', fallback=DEFAULT_CONFIG['db_file'])
 MAX_NOTIFICATIONS_PER_URL = int(config.get('DEFAULT', 'max_notifications', fallback=DEFAULT_CONFIG['max_notifications']))
 MIN_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'min_notification_length', fallback=DEFAULT_CONFIG['min_notification_length']))
@@ -99,6 +102,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
 ]
+
+# Track consecutive aiohttp failures per URL
+AIOHTTP_FAILURES = {url: 0 for url in URLS}
+AIOHTTP_FAILURE_THRESHOLD = 3  # Switch to requests after 3 failures
 
 def save_cookies(cookies: Dict):
     """Save cookies to file."""
@@ -249,8 +256,54 @@ async def fetch_with_playwright(url: str) -> Optional[str]:
         logger.error("Playwright initialization failed", error=str(e))
         return None
 
+def fetch_with_requests(url: str) -> Optional[str]:
+    """Fetch page using requests (final fallback)."""
+    logger.info(f"Using requests fallback for {url}")
+    session = requests.Session()
+    retries = Retry(total=1, backoff_factor=0.1, status_forcelist=[429])
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+        'Referer': 'https://www.google.com/',
+        'Connection': 'keep-alive',
+    }
+    cookies = load_cookies()
+    proxy = random.choice(PROXY_POOL) if PROXY_POOL else None
+    
+    try:
+        response = session.get(
+            url,
+            headers=headers,
+            cookies=cookies,
+            timeout=10,
+            verify=False,  # Disable SSL verification
+            proxies={'http': proxy, 'https': proxy}
+        )
+        if response.status_code == 403:
+            logger.warning(f"403 Forbidden on {url} with requests. Update cookies.")
+            return None
+        elif response.status_code == 429:
+            logger.warning(f"429 Rate Limit on {url}. Waiting 30s...")
+            time.sleep(30)
+            return None
+        response.raise_for_status()
+        content = response.text
+        if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
+            logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
+            return None
+        # Save cookies
+        save_cookies({c.name: c.value for c in session.cookies})
+        return content
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Requests fallback failed for {url}: {str(e)}")
+        return None
+
 async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
-    """Fetch page with aiohttp, mimicking requests behavior."""
+    """Fetch page with aiohttp, falling back to Playwright or requests."""
     if not url.startswith(('http://', 'https://')):
         url = f'https://{url}'
     headers = {
@@ -271,31 +324,42 @@ async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
                 ssl=False  # Disable SSL verification
             ) as response:
                 if response.status == 403:
-                    logger.warning(f"403 Forbidden on {url}. Check cookies or use VPN.")
+                    logger.warning(f"403 Forbidden on {url} with aiohttp")
+                    AIOHTTP_FAILURES[url] += 1
                     break
                 elif response.status == 429:
                     retry_after = int(response.headers.get('Retry-After', 30))
                     logger.warning(f"429 Rate Limit on {url}, retrying after {retry_after}s")
+                    AIOHTTP_FAILURES[url] += 1
                     await asyncio.sleep(retry_after)
                     continue
                 response.raise_for_status()
                 content = await response.text(encoding='utf-8', errors='ignore')
                 if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
                     logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
+                    AIOHTTP_FAILURES[url] += 1
                     break
-                if len(content) > 1000:
-                    return content
+                AIOHTTP_FAILURES[url] = 0  # Reset failure count on success
+                return content
         except Exception as e:
             logger.warning(f"Attempt {attempt} failed for URL: {url}", error=str(e))
+            AIOHTTP_FAILURES[url] += 1
             await asyncio.sleep(2 ** attempt)
-        
-        # Fallback to Playwright only if manual cookies are available
-        if os.path.exists(COOKIE_FILE):
-            playwright_content = await fetch_with_playwright(url)
-            if playwright_content:
-                return playwright_content
-        logger.error(f"All attempts failed for URL: {url}. Try manual cookie extraction.")
-        return None
+    
+    # Check if aiohttp failures exceed threshold
+    if AIOHTTP_FAILURES[url] >= AIOHTTP_FAILURE_THRESHOLD:
+        logger.info(f"aiohttp failed {AIOHTTP_FAILURE_THRESHOLD} times for {url}. Switching to requests.")
+        return fetch_with_requests(url)
+    
+    # Fallback to Playwright if cookies are available
+    if os.path.exists(COOKIE_FILE):
+        playwright_content = await fetch_with_playwright(url)
+        if playwright_content:
+            AIOHTTP_FAILURES[url] = 0  # Reset failure count
+            return playwright_content
+    
+    logger.error(f"All attempts failed for URL: {url}. Try manual cookie extraction.")
+    return None
 
 def extract_dates(text: str) -> List[datetime]:
     if not text:
@@ -355,29 +419,43 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
     notifications = []
     current_month = datetime.now().month
     current_year = datetime.now().year
-    selectors = [
-        'li', 'p', 'div.notification', 'div.news-item', 
-        'div.announcement', 'a[href*="notification"]',
-        'a[href*="circular"]', 'a[href*="advertisement"]',
-        'div.post', 'div.entry-content', 'div.article',
-        'tr', 'td'
-    ]
-    for element in soup.select(', '.join(selectors)):
-        text = element.get_text(' ', strip=True)
-        if not is_relevant_notification(text):
+    for a in soup.find_all('a', href=True):
+        text = a.get_text(strip=True)
+        href = a['href']
+        if not text or not href:
             continue
+        if not any(keyword.lower() in text.lower() for keyword in KEYWORDS):
+            continue
+        if href.startswith("/"):
+            href = urljoin(url, href)
         dates = extract_dates(text)
         if not dates:
+            # Try extracting date from nearby elements
+            candidates = [
+                a.get('title', ''),
+                a.find_next_sibling(text=True).strip() if a.find_next_sibling(text=True) else '',
+                a.parent.get_text(" ", strip=True) if a.parent else ''
+            ]
+            for candidate in candidates:
+                dates = extract_dates(candidate)
+                if dates:
+                    break
+        if not dates:
             continue
-        most_recent_date = max(dates) if dates else None
+        most_recent_date = max(dates)
         content_hash = generate_content_hash(text)
         semantic_hash = generate_semantic_hash(text)
         notification_id = f"{url}:{content_hash}"
+        is_pdf = href.lower().endswith(".pdf")
+        notification_text = (
+            f"{'PDF' if is_pdf else 'Post'}: {text}\n"
+            f"{'PDF Link' if is_pdf else 'Link'}: {href}"
+        )
         notifications.append({
             'id': notification_id,
             'url': url,
-            'text': text,
-            'date': most_recent_date.strftime('%Y-%m-%d') if most_recent_date else 'No date',
+            'text': notification_text,
+            'date': most_recent_date.strftime('%Y-%m-%d'),
             'content_hash': content_hash,
             'semantic_hash': semantic_hash
         })
