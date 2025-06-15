@@ -15,7 +15,7 @@ from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 import structlog
 from playwright.async_api import async_playwright
-from url import URLS  # This imports your URLs list
+from url import URLS  # Import URLs from url.py
 
 # Suppress unnecessary warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -44,7 +44,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Configuration defaults
+# Configuration defaults (excluding URLs since they come from url.py)
 DEFAULT_CONFIG = {
     'timeout': 60,
     'retries': 3,
@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     'notification_age_days': 30
 }
 
-# Initialize configuration
+# Initialize configuration (excluding URL related settings)
 TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=DEFAULT_CONFIG['timeout']))
 RETRIES = int(config.get('DEFAULT', 'retries', fallback=DEFAULT_CONFIG['retries']))
 KEYWORDS = [k.strip() for k in config.get('DEFAULT', 'keywords', fallback=DEFAULT_CONFIG['keywords']).split(',')]
@@ -363,7 +363,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Website Notification Monitor")
-    parser.add_argument('--urls', nargs='+', help="URLs to monitor")
+    parser.add_argument('--urls', nargs='+', help="Optional: Override URLs from url.py")
     parser.add_argument('--config', default='config.ini', help="Configuration file path")
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help="Logging level")
     
@@ -372,15 +372,11 @@ if __name__ == "__main__":
     # Set logging level
     logging.basicConfig(level=args.log_level)
     
-    # Load URLs from config if not provided
-    urls_to_monitor = args.urls
-    if not urls_to_monitor:
-        config.read(args.config)
-        urls_to_monitor = config.get('DEFAULT', 'urls', fallback="").split(',')
-        urls_to_monitor = [url.strip() for url in urls_to_monitor if url.strip()]
+    # Use URLs from command line if provided, otherwise from url.py
+    urls_to_monitor = args.urls if args.urls else URLS
     
     if not urls_to_monitor:
-        logger.error("No URLs provided to monitor")
+        logger.error("No URLs provided to monitor - please add URLs in url.py or use --urls argument")
         exit(1)
     
     logger.info(f"Starting monitoring for {len(urls_to_monitor)} URLs")
