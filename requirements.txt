@@ -1,20 +1,16 @@
-# Base Requirements
+# Core Requirements
 aiohttp>=3.8.0
 beautifulsoup4>=4.11.0
-python-dotenv>=0.19.0
-configparser>=5.0.2
+python-dotenv>=1.0.1
 python-dateutil>=2.8.2
-playwright>=1.22.0
-structlog>=21.5.0
-brotli
-sentence-transformers
-playwright-stealth
-
-# Additional NLP Processing (optional)
-transformers>=4.19.0
+playwright>=1.47.0
+structlog>=24.4.0
+brotli>=1.1.0
 sentence-transformers>=2.2.0
-scikit-learn>=1.0.2
+playwright-stealth>=0.3.0
+urllib3>=2.2.2
+2captcha-python>=1.2.2  # Optional: For captcha solving
 
 # Development Tools (optional)
-black>=22.3.0  # Code formatting
-flake8>=4.0.1  # Linting
+black>=24.10.0
+flake8>=7.1.0
