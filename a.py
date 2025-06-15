@@ -42,20 +42,19 @@ config.read('config.ini')
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
-# Proxy pool (add your proxies here)
+# Proxy pool (use residential proxies)
 PROXY_POOL = [
     None,  # No proxy
-    # Example: "http://user:pass@proxy1:port",
-    # Example: "http://user:pass@proxy2:port",
+    # Example: "http://user:pass@residential_proxy1:port",
 ]
 
-# Cookie storage for persistence
+# Cookie file
 COOKIE_FILE = "cookies.json"
 
 # Configuration defaults
 DEFAULT_CONFIG = {
-    'timeout': 60,
-    'retries': 3,
+    'timeout': 30,  # Reduced for faster requests
+    'retries': 1,  # Minimal retries to avoid flagging
     'keywords': "recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key,notice,announcement",
     'exclude_words': "home,about us,contact,main navigation,menu,privacy policy,disclaimer",
     'db_file': "sent_notifications.db",
@@ -66,17 +65,17 @@ DEFAULT_CONFIG = {
     'notification_age_days': 30,
     'rss_timeout': 30,
     'sitemap_timeout': 30,
-    'max_concurrent_requests': 1,  # Reduced to 1 for human-like behavior
-    'delay_between_requests': 10,  # Increased to 10s to avoid rate limits
+    'max_concurrent_requests': 1,  # Single request
+    'delay_between_requests': 600,  # 10 minutes base delay
     'respect_robots': True,
-    'user_agent': 'GovNotificationBot/1.0 (+https://github.com/yourrepo)'
+    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 }
 
 # Initialize configuration
 TIMEOUT = int(config.get('DEFAULT', 'timeout', fallback=DEFAULT_CONFIG['timeout']))
 RETRIES = int(config.get('DEFAULT', 'retries', fallback=DEFAULT_CONFIG['retries']))
 KEYWORDS = [k.strip() for k in config.get('DEFAULT', 'keywords', fallback=DEFAULT_CONFIG['keywords']).split(',')]
-EXCLUDE_WORDS = [w.strip() for w in config.get('DEFAULT', 'exclude_words', fallback=DEFAULT_CONFIG['exclude_words']).split(',')]
+EXCLUDE_WORDS = [w.strip() for k in config.get('DEFAULT', 'exclude_words', fallback=DEFAULT_CONFIG['exclude_words']).split(',')]
 SENT_POSTS_DB = config.get('DEFAULT', 'db_file', fallback=DEFAULT_CONFIG['db_file'])
 MAX_NOTIFICATIONS_PER_URL = int(config.get('DEFAULT', 'max_notifications', fallback=DEFAULT_CONFIG['max_notifications']))
 MIN_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'min_notification_length', fallback=DEFAULT_CONFIG['min_notification_length']))
@@ -93,36 +92,35 @@ USER_AGENT = config.get('DEFAULT', 'user_agent', fallback=DEFAULT_CONFIG['user_a
 # Load sentence transformer model
 model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
-# User Agents for rotation (updated to latest browser versions)
+# User Agents for rotation
 USER_AGENTS = [
+    USER_AGENT,
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5; rv:127.0) Gecko/20100101 Firefox/127.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/126.0.2592.81",
 ]
 
-def save_cookies(cookies: List[Dict]):
-    """Save cookies to a file for persistence."""
+def save_cookies(cookies: Dict):
+    """Save cookies to file."""
     try:
         with open(COOKIE_FILE, 'w') as f:
             json.dump(cookies, f)
-        logger.debug("Cookies saved to file")
+        logger.debug("Cookies saved")
     except Exception as e:
         logger.error(f"Failed to save cookies: {str(e)}")
 
-def load_cookies() -> List[Dict]:
-    """Load cookies from a file."""
+def load_cookies() -> Dict:
+    """Load cookies from file."""
     try:
         if os.path.exists(COOKIE_FILE):
             with open(COOKIE_FILE, 'r') as f:
                 cookies = json.load(f)
-            logger.debug("Cookies loaded from file")
+            logger.debug("Cookies loaded")
             return cookies
-        return []
+        return {}
     except Exception as e:
         logger.error(f"Failed to load cookies: {str(e)}")
-        return []
+        return {}
 
 def init_db():
     try:
@@ -201,55 +199,45 @@ def mark_notification_sent(url: str, notification_id: str, content_hash: str, se
         logger.error("Failed to mark notification as sent", error=str(e))
 
 async def fetch_with_playwright(url: str) -> Optional[str]:
-    """Fetch page using Playwright with human-like behavior."""
+    """Fetch page using Playwright (fallback only)."""
+    logger.warning(f"Using Playwright fallback for {url}. Ensure cookies are preloaded.")
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=False,
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
+            )
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
-                viewport={'width': random.randint(1280, 1920), 'height': random.randint(720, 1080)},  # Random viewport
+                viewport={'width': random.randint(1280, 1920), 'height': random.randint(720, 1080)},
                 locale='en-US',
                 timezone_id='Asia/Kolkata',
                 java_script_enabled=True,
-                # Load saved cookies
-                storage_state={'cookies': load_cookies()},
                 proxy={'server': random.choice(PROXY_POOL) if PROXY_POOL else None}
             )
             page = await context.new_page()
-            await stealth_async(page)  # Apply stealth to evade bot detection
+            await stealth_async(page)
+
             try:
                 if not url.startswith(('http://', 'https://')):
                     url = f'https://{url}'
                 
-                # Human-like navigation: Start from homepage or referer
                 parsed = urlparse(url)
                 homepage = f"{parsed.scheme}://{parsed.netloc}"
                 await page.goto(homepage, timeout=TIMEOUT*1000, wait_until="domcontentloaded")
-                await asyncio.sleep(random.uniform(2, 5))  # Random delay like a user
+                await asyncio.sleep(random.uniform(3, 7))
                 
-                # Simulate mouse movement
                 await page.mouse.move(random.randint(100, 500), random.randint(100, 500))
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-                await asyncio.sleep(random.uniform(1, 3))
-                
-                # Navigate to target URL
-                await page.goto(url, timeout=TIMEOUT*1000, wait_until="networkidle")
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 4)")
                 await asyncio.sleep(random.uniform(2, 5))
                 
-                # Simulate more human interaction
-                await page.mouse.move(random.randint(200, 600), random.randint(200, 600))
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-                await asyncio.sleep(random.uniform(1, 4))
+                await page.goto(url, timeout=TIMEOUT*1000, wait_until="networkidle")
+                await asyncio.sleep(random.uniform(3, 7))
                 
-                # Check for captchas
                 content = await page.content()
                 if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
-                    logger.warning(f"Captcha detected on {url}. Solve manually in Chrome or use a captcha-solving service.")
+                    logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
                     return None
-                
-                # Save cookies for next session
-                cookies = await context.cookies()
-                save_cookies(cookies)
                 
                 await browser.close()
                 return content
@@ -261,64 +249,53 @@ async def fetch_with_playwright(url: str) -> Optional[str]:
         logger.error("Playwright initialization failed", error=str(e))
         return None
 
-async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) -> Optional[str]:
-    """Fetch page with aiohttp, falling back to Playwright if needed."""
+async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
+    """Fetch page with aiohttp, mimicking requests behavior."""
     if not url.startswith(('http://', 'https://')):
         url = f'https://{url}'
     headers = {
         'User-Agent': random.choice(USER_AGENTS),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',  # Added Hindi for Indian websites
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
         'Referer': 'https://www.google.com/',
-        'DNT': '1',
-        # Add manual cookies if needed (e.g., from Chrome DevTools)
-        # 'Cookie': 'session_id=abc123; user_prefs=xyz789',
+        'Connection': 'keep-alive',
     }
     for attempt in range(1, RETRIES + 1):
         try:
             proxy = random.choice(PROXY_POOL) if PROXY_POOL else None
-            if session:
-                async with session.get(
-                    url, 
-                    headers=headers, 
-                    timeout=TIMEOUT,
-                    proxy=proxy
-                ) as response:
-                    if response.status == 403:
-                        logger.warning(f"403 Forbidden on {url}, switching to Playwright")
-                        break  # Switch to Playwright immediately
-                    elif response.status == 429:
-                        retry_after = int(response.headers.get('Retry-After', 10))
-                        logger.warning(f"429 Rate Limit on {url}, retrying after {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    response.raise_for_status()
-                    content = await response.text(encoding='utf-8', errors='ignore')
-                    if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
-                        logger.warning(f"Captcha detected on {url}. Switching to Playwright.")
-                        break
-                    if len(content) > 1000:
-                        return content
+            async with session.get(
+                url, 
+                headers=headers, 
+                timeout=TIMEOUT,
+                proxy=proxy,
+                ssl=False  # Disable SSL verification
+            ) as response:
+                if response.status == 403:
+                    logger.warning(f"403 Forbidden on {url}. Check cookies or use VPN.")
+                    break
+                elif response.status == 429:
+                    retry_after = int(response.headers.get('Retry-After', 30))
+                    logger.warning(f"429 Rate Limit on {url}, retrying after {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+                response.raise_for_status()
+                content = await response.text(encoding='utf-8', errors='ignore')
+                if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
+                    logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
+                    break
+                if len(content) > 1000:
+                    return content
         except Exception as e:
             logger.warning(f"Attempt {attempt} failed for URL: {url}", error=str(e))
             await asyncio.sleep(2 ** attempt)
         
-        # Fallback to Playwright
-        playwright_content = await fetch_with_playwright(url)
-        if playwright_content:
-            return playwright_content
-        await asyncio.sleep(2 ** attempt)
-    
-    logger.error(f"All attempts failed for URL: {url}")
-    return None
+        # Fallback to Playwright only if manual cookies are available
+        if os.path.exists(COOKIE_FILE):
+            playwright_content = await fetch_with_playwright(url)
+            if playwright_content:
+                return playwright_content
+        logger.error(f"All attempts failed for URL: {url}. Try manual cookie extraction.")
+        return None
 
 def extract_dates(text: str) -> List[datetime]:
     if not text:
@@ -451,7 +428,7 @@ async def check_robots_txt(url: str, session: aiohttp.ClientSession) -> Tuple[bo
     parsed = urlparse(url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
     try:
-        async with session.get(robots_url, timeout=10) as response:
+        async with session.get(robots_url, timeout=10, ssl=False) as response:
             if response.status == 200:
                 content = await response.text()
                 if f"User-agent: {USER_AGENT.split('/')[0]}" in content:
@@ -475,7 +452,7 @@ async def fetch_rss_feed(url: str, session: aiohttp.ClientSession) -> Optional[L
     for path in feed_paths:
         feed_url = urljoin(base_url, path)
         try:
-            async with session.get(feed_url, timeout=RSS_TIMEOUT) as response:
+            async with session.get(feed_url, timeout=RSS_TIMEOUT, ssl=False) as response:
                 if response.status == 200:
                     content = await response.text()
                     return parse_feed(content, base_url)
@@ -494,7 +471,7 @@ def parse_feed(content: str, base_url: str) -> List[Dict]:
             pub_date = item.findtext('pubDate', '') or item.findtext('published', '')
             if not link.startswith('http'):
                 link = urljoin(base_url, link)
-            if title and link:
+            if title:
                 items.append({
                     'title': title,
                     'url': link,
@@ -509,7 +486,7 @@ async def fetch_sitemap(url: str, session: aiohttp.ClientSession) -> Optional[Li
     parsed = urlparse(url)
     sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
     try:
-        async with session.get(sitemap_url, timeout=SITEMAP_TIMEOUT) as response:
+        async with session.get(sitemap_url, timeout=SITEMAP_TIMEOUT, ssl=False) as response:
             if response.status == 200:
                 content = await response.text()
                 return parse_sitemap(content)
@@ -539,7 +516,7 @@ async def process_url(url: str, session: aiohttp.ClientSession) -> Optional[List
     if not allowed:
         logger.info(f"Skipping {url} due to robots.txt restrictions")
         return None
-    await asyncio.sleep(delay)
+    await asyncio.sleep(delay + random.uniform(0, 600))  # Randomize delay up to 20 minutes
     rss_items = await fetch_rss_feed(url, session)
     if rss_items:
         logger.debug(f"Found {len(rss_items)} items in RSS feed for {url}")
@@ -560,8 +537,9 @@ async def monitor_urls(urls: List[str]):
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     async def process_with_semaphore(url):
         async with semaphore:
-            return await process_url(url, session)
-    async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(cookies=load_cookies()) as session:
+                return await process_url(url, session)
+    while True:
         tasks = [process_with_semaphore(url) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for url, result in zip(urls, results):
@@ -590,22 +568,21 @@ async def monitor_urls(urls: List[str]):
                     logger.info(f"Sent notification: {notification['id']}")
                 else:
                     logger.error(f"Failed to send notification: {notification['id']}")
-                await asyncio.sleep(DELAY_BETWEEN_REQUESTS)
+        await asyncio.sleep(random.uniform(DELAY_BETWEEN_REQUESTS, DELAY_BETWEEN_REQUESTS + 600))  # 10–20 minutes
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Website Notification Monitor")
     parser.add_argument('--urls', nargs='+', help="Optional: Override URLs from url.py")
-    parser.add_argument('--config', default='config.ini', help="Configuration file path")
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help="Logging level")
     args = parser.parse_args()
     logging.basicConfig(level=args.log_level)
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.error("Telegram credentials not found. Please set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID environment variables.")
+        logger.error("Telegram credentials not configured")
         exit(1)
     urls_to_monitor = args.urls if args.urls else URLS
     if not urls_to_monitor:
-        logger.error("No URLs provided to monitor")
+        logger.error("No URLs provided")
         exit(1)
     logger.info(f"Starting monitoring for {len(urls_to_monitor)} URLs")
     asyncio.run(monitor_urls(urls_to_monitor))
