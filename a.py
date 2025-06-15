@@ -117,7 +117,7 @@ def save_sent_post(notification_id: str):
     except sqlite3.Error as e:
         logger.error("Failed to save notification ID", id=notification_id, error=str(e))
 
-def send_telegram(message: str, url: str) -> bool:
+async def send_telegram(message: str, url: str) -> bool:
     """Send a message to Telegram without escaping text or date."""
     telegram_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     lines = message.split('\n')
@@ -134,26 +134,27 @@ def send_telegram(message: str, url: str) -> bool:
         "text": formatted_message,
         "parse_mode": "Markdown"
     }
-    for attempt in range(1, 4):
-        try:
-            resp = aiohttp.ClientSession().post(telegram_url, json=data, timeout=30)
-            resp.raise_for_status()
-            logger.info("Telegram message sent", message=formatted_message[:50], url=url)
-            time.sleep(1.0)
-            return True
-        except aiohttp.ClientError as e:
-            logger.warning("Telegram send failed", attempt=attempt, error=str(e))
-            time.sleep(2 ** attempt)
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(1, 4):
+            try:
+                async with session.post(telegram_url, json=data, timeout=30) as resp:
+                    resp.raise_for_status()
+                    logger.info("Telegram message sent", message=formatted_message[:50], url=url)
+                    await asyncio.sleep(1.0)
+                    return True
+            except aiohttp.ClientError as e:
+                logger.warning("Telegram send failed", attempt=attempt, error=str(e))
+                await asyncio.sleep(2 ** attempt)
     logger.error("Failed to send Telegram message after retries", message=formatted_message[:50], url=url)
     return False
 
-def send_failure_alert(failed_urls: List[str]):
+async def send_failure_alert(failed_urls: List[str]):
     """Send a Telegram alert for failed URLs if >50% fail."""
     if not failed_urls or len(failed_urls) < len(URLS) * 0.5:
         return
     message = f"*Critical Alert*\n\nMore than 50% of URLs failed to fetch:\n" + "\n".join(failed_urls[:10]) + \
               f"\n\nTotal failed: {len(failed_urls)}/{len(URLS)}. Check logs for details."
-    send_telegram(message, "N/A")
+    await send_telegram(message, "N/A")
 
 async def fetch_page_async(url: str, session: aiohttp.ClientSession) -> Optional[str]:
     """Fetch HTML content asynchronously with retries and User-Agent rotation."""
@@ -347,7 +348,7 @@ async def main(urls: List[str] = URLS):
                 notifications = parse_notifications(url, html, sent_posts)
                 for notification_id, message in notifications:
                     sent_posts.add(notification_id)
-                    if send_telegram(message, url):
+                    if await send_telegram(message, url):
                         save_sent_post(notification_id)
                         logger.info("Sent notification", id=notification_id, message=message[:50], url=url)
                     else:
@@ -360,11 +361,11 @@ async def main(urls: List[str] = URLS):
 
     if failed_urls:
         logger.warning("Summary of failed URLs", failed_count=len(failed_urls), total_urls=len(urls), failed_urls=failed_urls)
-        send_failure_alert(failed_urls)
+        await send_failure_alert(failed_urls)
     else:
         logger.info("All URLs processed successfully", total_urls=len(urls))
 
-if __name__ == "__main__":
+if __name__ == "__module__":
     import argparse
     parser = argparse.ArgumentParser(description="Website Notification Monitor")
     parser.add_argument('--urls', nargs='+', default=URLS, help="URLs to monitor")
