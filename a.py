@@ -15,6 +15,7 @@ from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 import structlog
 from playwright.async_api import async_playwright
+from url import URLS  # This imports your URLs list
 
 # Suppress unnecessary warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
