@@ -1,13 +1,18 @@
-aiohttp==3.9.5
-beautifulsoup4==4.12.3
-charset-normalizer==3.3.2
-python-dateutil==2.9.0
-python-dotenv==1.0.1
-scikit-learn==1.5.0
-scrapy==2.11.2
-scrapy-playwright==0.0.41
-sentence-transformers==2.7.0
-structlog==24.2.0
-transformers==4.41.2
-huggingface_hub==0.23.4
-torch==2.3.0
+# Base Requirements
+aiohttp>=3.8.0
+beautifulsoup4>=4.11.0
+python-dotenv>=0.19.0
+configparser>=5.0.2
+python-dateutil>=2.8.2
+playwright>=1.22.0
+structlog>=21.5.0
+sqlite3>=3.35.0  # Usually comes with Python
+
+# Additional NLP Processing (optional)
+transformers>=4.19.0
+sentence-transformers>=2.2.0
+scikit-learn>=1.0.2
+
+# Development Tools (optional)
+black>=22.3.0  # Code formatting
+flake8>=4.0.1  # Linting
