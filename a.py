@@ -6,6 +6,7 @@ import re
 import random
 import asyncio
 import aiohttp
+import ssl
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from bs4 import BeautifulSoup
@@ -13,6 +14,7 @@ from dateutil.parser import parse as date_parse
 from dotenv import load_dotenv
 import structlog
 from playwright.async_api import async_playwright
+from sentence_transformers import SentenceTransformer, util
 from url import URLS  # Import URLs from url.py file
 
 # Configure structured logging without emojis
@@ -42,13 +44,13 @@ TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
 DEFAULT_CONFIG = {
     'timeout': 60,
     'retries': 3,
-    'keywords': "recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key",
+    'keywords': "recruitment,vacancy,exam,admit card,notification,interview,application,results,answer key,notice,announcement",
     'exclude_words': "home,about us,contact,main navigation,menu,privacy policy,disclaimer",
     'db_file': "sent_notifications.db",
     'max_notifications': 5,
     'min_notification_length': 20,
     'max_notification_length': 1000,
-    'similarity_threshold': 0.9,
+    'similarity_threshold': 0.85,
     'notification_age_days': 30
 }
 
@@ -63,6 +65,9 @@ MIN_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'min_notification_length', f
 MAX_NOTIFICATION_LENGTH = int(config.get('DEFAULT', 'max_notification_length', fallback=DEFAULT_CONFIG['max_notification_length']))
 SIMILARITY_THRESHOLD = float(config.get('DEFAULT', 'similarity_threshold', fallback=DEFAULT_CONFIG['similarity_threshold']))
 NOTIFICATION_AGE_DAYS = int(config.get('DEFAULT', 'notification_age_days', fallback=DEFAULT_CONFIG['notification_age_days']))
+
+# Load sentence transformer model for semantic similarity
+model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
 # User Agents for request rotation
 USER_AGENTS = [
@@ -81,11 +86,15 @@ def init_db():
                     id TEXT PRIMARY KEY,
                     url TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
+                    semantic_hash TEXT NOT NULL,
+                    notification_text TEXT NOT NULL,
+                    extracted_date TEXT,
                     sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     notified BOOLEAN DEFAULT TRUE
                 )
             ''')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_content_hash ON notifications(content_hash)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_semantic_hash ON notifications(semantic_hash)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_sent_at ON notifications(sent_at)')
             conn.commit()
         logger.info("Database initialized successfully")
@@ -104,23 +113,50 @@ def cleanup_old_entries():
     except sqlite3.Error as e:
         logger.error("Database cleanup failed", error=str(e))
 
-def is_notification_sent(content_hash: str) -> bool:
-    """Check if a notification with this content hash has already been sent."""
+def is_notification_sent(content_hash: str, semantic_hash: str) -> bool:
+    """Check if a similar notification has already been sent."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
-            cursor = conn.execute("SELECT 1 FROM notifications WHERE content_hash = ? LIMIT 1", (content_hash,))
-            return cursor.fetchone() is not None
+            # Check exact match first
+            cursor = conn.execute(
+                "SELECT 1 FROM notifications WHERE content_hash = ? LIMIT 1", 
+                (content_hash,)
+            )
+            if cursor.fetchone() is not None:
+                return True
+            
+            # Check for similar notifications using semantic hashes
+            cursor = conn.execute(
+                "SELECT notification_text FROM notifications WHERE semantic_hash = ? LIMIT 5",
+                (semantic_hash,)
+            )
+            existing_notifications = cursor.fetchall()
+            
+            if existing_notifications:
+                # Compare with each existing notification
+                for (existing_text,) in existing_notifications:
+                    if is_similar_notification(existing_text, content_hash):
+                        return True
+            return False
     except sqlite3.Error as e:
         logger.error("Failed to check notification status", error=str(e))
         return False
 
-def mark_notification_sent(url: str, notification_id: str, content_hash: str):
+def is_similar_notification(text1: str, text2: str) -> bool:
+    """Check if two notifications are semantically similar using AI"""
+    embeddings = model.encode([text1, text2], convert_to_tensor=True)
+    similarity = util.pytorch_cos_sim(embeddings[0], embeddings[1]).item()
+    return similarity > SIMILARITY_THRESHOLD
+
+def mark_notification_sent(url: str, notification_id: str, content_hash: str, semantic_hash: str, text: str, date: str):
     """Mark a notification as sent in the database."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO notifications (id, url, content_hash) VALUES (?, ?, ?)",
-                (notification_id, url, content_hash)
+                """INSERT OR IGNORE INTO notifications 
+                (id, url, content_hash, semantic_hash, notification_text, extracted_date) 
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (notification_id, url, content_hash, semantic_hash, text, date)
             )
             conn.commit()
         logger.debug("Notification marked as sent in database")
@@ -142,7 +178,6 @@ async def fetch_with_playwright(url: str) -> Optional[str]:
             page = await context.new_page()
             
             try:
-                # Prepend https:// if missing
                 if not url.startswith(('http://', 'https://')):
                     url = f'https://{url}'
                 
@@ -163,11 +198,9 @@ async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) 
     Fetch page content with retries and fallback methods.
     Handles both direct URL access and https:// prefixed URLs.
     """
-    # Prepare proper URL format
     if not url.startswith(('http://', 'https://')):
         url = f'https://{url}'
     
-    # Enhanced headers to prevent 403 Forbidden
     headers = {
         'User-Agent': random.choice(USER_AGENTS),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -175,27 +208,30 @@ async def fetch_page(url: str, session: Optional[aiohttp.ClientSession] = None) 
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0'
+        'Referer': 'https://www.google.com/',
+        'DNT': '1'
     }
+    
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
     
     for attempt in range(1, RETRIES + 1):
         try:
-            # First try with aiohttp
             if session:
-                async with session.get(url, headers=headers, timeout=TIMEOUT) as response:
+                async with session.get(
+                    url, 
+                    headers=headers, 
+                    timeout=TIMEOUT,
+                    ssl=ssl_context
+                ) as response:
                     if response.status == 403:
-                        # If forbidden, try with Playwright immediately
                         raise Exception("403 Forbidden - Switching to Playwright")
                     response.raise_for_status()
                     content = await response.text(encoding='utf-8', errors='ignore')
                     if len(content) > 1000:
                         return content
             
-            # Fallback to Playwright
             playwright_content = await fetch_with_playwright(url)
             if playwright_content:
                 return playwright_content
@@ -216,20 +252,28 @@ def extract_dates(text: str) -> List[datetime]:
     
     month_names = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
     patterns = [
-        rf'\b(\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}})\b',
-        rf'\b(\d{{1,2}}\s+{month_names}\s+\d{{4}})\b',
-        rf'\b({month_names}\s+\d{{1,2}}(?:st|nd|rd|th)?\s+\d{{4}})\b',
-        rf'\b({month_names}\s+\d{{4}})\b',
-        rf'\b(\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}})\b',
-        rf'\b(\d{{1,2}}\s+{month_names}\s+\d{{4}})\b',
+        # Indian date formats (dd-mm-yyyy)
+        r'\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b',
+        # Month name patterns
+        r'\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})\b',
+        # Year first patterns
+        r'\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b',
+        # Full month names
+        r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b',
+        # Month abbreviations
+        r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b'
     ]
     
     dates = []
+    current_year = datetime.now().year
+    current_month = datetime.now().month
+    
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             try:
                 dt = date_parse(match.group(0), dayfirst=True, yearfirst=True)
-                if 2000 <= dt.year <= datetime.now().year + 1:
+                # Only consider dates from current month and year
+                if dt.year == current_year and dt.month == current_month:
                     dates.append(dt)
             except ValueError:
                 continue
@@ -261,14 +305,35 @@ def is_relevant_notification(text: str) -> bool:
         'advertisement',
         'announcement',
         'circular',
-        'notice'
+        'notice',
+        'apply before',
+        'last date to apply',
+        'application form'
+        'admit card'
+        'result'
+        'extends'
+        'extended'
+        'vacancy'
+        'vacancies'
+        'candidates'
+        'exam'
+        'examination'
+        'declared'
     ]
     return any(phrase in text_lower for phrase in notification_phrases)
 
 def generate_content_hash(text: str) -> str:
     """Generate a consistent hash for notification content."""
     normalized = re.sub(r'\s+', ' ', text.strip().lower())
+    # Remove dates and numbers that might change
+    normalized = re.sub(r'\d+', '', normalized)
+    normalized = re.sub(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', '', normalized)
     return str(hash(normalized))
+
+def generate_semantic_hash(text: str) -> str:
+    """Generate a semantic hash for similarity comparison."""
+    embedding = model.encode(text, convert_to_tensor=True)
+    return str(embedding.mean().item())  # Simplified semantic hash
 
 def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
     """Extract potential notifications from HTML content."""
@@ -277,12 +342,16 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
     
     soup = BeautifulSoup(html, 'html.parser')
     notifications = []
+    current_month = datetime.now().month
+    current_year = datetime.now().year
     
     # Look for common notification containers
     selectors = [
         'li', 'p', 'div.notification', 'div.news-item', 
         'div.announcement', 'a[href*="notification"]',
-        'a[href*="circular"]', 'a[href*="advertisement"]'
+        'a[href*="circular"]', 'a[href*="advertisement"]',
+        'div.post', 'div.entry-content', 'div.article',
+        'tr', 'td'  # For table-based notifications
     ]
     
     for element in soup.select(', '.join(selectors)):
@@ -290,17 +359,16 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
         if not is_relevant_notification(text):
             continue
         
-        # Extract dates
+        # Extract dates - only consider current month
         dates = extract_dates(text)
-        recent_dates = [dt for dt in dates if dt >= datetime.now() - timedelta(days=NOTIFICATION_AGE_DAYS)]
-        
-        if not recent_dates and not dates:
-            continue  # No dates or only old dates
+        if not dates:
+            continue  # Skip if no dates in current month
             
-        most_recent_date = max(recent_dates) if recent_dates else max(dates) if dates else None
+        most_recent_date = max(dates) if dates else None
         
-        # Generate unique ID and content hash
+        # Generate hashes
         content_hash = generate_content_hash(text)
+        semantic_hash = generate_semantic_hash(text)
         notification_id = f"{url}:{content_hash}"
         
         notifications.append({
@@ -308,7 +376,8 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
             'url': url,
             'text': text,
             'date': most_recent_date.strftime('%Y-%m-%d') if most_recent_date else 'No date',
-            'content_hash': content_hash
+            'content_hash': content_hash,
+            'semantic_hash': semantic_hash
         })
         
         if len(notifications) >= MAX_NOTIFICATIONS_PER_URL:
@@ -318,14 +387,14 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
 
 async def send_telegram_notification(notification: Dict[str, str], url: str) -> bool:
     """
-    Send notification to Telegram.
-    Works with GitHub secrets when properly configured.
+    Send notification to Telegram with retry logic for rate limits.
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("Telegram credentials not configured")
         return False
     
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    retry_delay = 1  # Start with 1 second delay
     
     # Format message without emojis
     formatted_msg = (
@@ -343,16 +412,24 @@ async def send_telegram_notification(notification: Dict[str, str], url: str) -> 
         'disable_web_page_preview': True
     }
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(telegram_url, json=payload, timeout=30) as response:
-                if response.status == 200:
-                    return True
-                logger.error(f"Telegram API error: {await response.text()}")
-                return False
-    except Exception as e:
-        logger.error(f"Failed to send Telegram message: {str(e)}")
-        return False
+    while retry_delay < 60:  # Maximum 1 minute wait
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(telegram_url, json=payload, timeout=30) as response:
+                    if response.status == 200:
+                        return True
+                    elif response.status == 429:
+                        retry_after = int((await response.json()).get('parameters', {}).get('retry_after', 5))
+                        await asyncio.sleep(retry_after)
+                        continue
+                    logger.error(f"Telegram API error: {await response.text()}")
+                    return False
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message: {str(e)}")
+            await asyncio.sleep(retry_delay)
+            retry_delay *= 2  # Exponential backoff
+    
+    return False
 
 async def monitor_urls(urls: List[str]):
     """Monitor a list of URLs for new notifications."""
@@ -371,11 +448,18 @@ async def monitor_urls(urls: List[str]):
             try:
                 notifications = extract_notifications(url, html)
                 for notification in notifications:
-                    if is_notification_sent(notification['content_hash']):
+                    if is_notification_sent(notification['content_hash'], notification['semantic_hash']):
                         continue
                     
                     if await send_telegram_notification(notification, url):
-                        mark_notification_sent(url, notification['id'], notification['content_hash'])
+                        mark_notification_sent(
+                            url=url,
+                            notification_id=notification['id'],
+                            content_hash=notification['content_hash'],
+                            semantic_hash=notification['semantic_hash'],
+                            text=notification['text'],
+                            date=notification['date']
+                        )
                         logger.info(f"Sent notification: {notification['id']}")
                     else:
                         logger.error(f"Failed to send notification: {notification['id']}")
