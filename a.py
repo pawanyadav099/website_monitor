@@ -21,6 +21,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from url import URLS  # Import URLs from url.py file
 import time
+import asyncio
 
 # Configure structured logging
 structlog.configure(
@@ -129,6 +130,7 @@ def load_cookies() -> Dict:
         return {}
 
 def init_db():
+    """Initialize the SQLite database."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
             conn.execute('''
@@ -153,6 +155,7 @@ def init_db():
         raise
 
 def cleanup_old_entries():
+    """Remove old entries from the database."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
             cutoff_date = (datetime.now() - timedelta(days=NOTIFICATION_AGE_DAYS)).strftime('%Y-%m-%d')
@@ -163,6 +166,7 @@ def cleanup_old_entries():
         logger.error("Database cleanup failed", error=str(e))
 
 def is_notification_sent(content_hash: str, semantic_hash: str) -> bool:
+    """Check if a notification has already been sent."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
             cursor = conn.execute(
@@ -186,11 +190,13 @@ def is_notification_sent(content_hash: str, semantic_hash: str) -> bool:
         return False
 
 def is_similar_notification(text1: str, text2: str) -> bool:
+    """Check if two notifications are semantically similar."""
     embeddings = model.encode([text1, text2], convert_to_tensor=True)
     similarity = util.pytorch_cos_sim(embeddings[0], embeddings[1]).item()
     return similarity > SIMILARITY_THRESHOLD
 
 def mark_notification_sent(url: str, notification_id: str, content_hash: str, semantic_hash: str, text: str, date: str):
+    """Mark a notification as sent in the database."""
     try:
         with sqlite3.connect(SENT_POSTS_DB) as conn:
             conn.execute(
@@ -299,7 +305,7 @@ def fetch_with_requests(url: str) -> Optional[str]:
         content = response.text
         if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
             logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
-            REQUESTS_FAILURES['url'] += 1
+            REQUESTS_FAILURES[url] += 1
             return None
         # Save cookies
         save_cookies({c.name: c.value for c in session.cookies})
@@ -308,13 +314,11 @@ def fetch_with_requests(url: str) -> Optional[str]:
         return content
     except requests.exceptions.RequestException as e:
         logger.error(f"Requests failed for {url}: {str(e)}")
-        REQUESTS_FAILURES['url'] += 1
+        REQUESTS_FAILURES[url] += 1
         return None
 
 def fetch_page(url: str) -> Optional[str]:
-    """
-    Fetch page using requests, falling back to Playwright if needed.
-    """
+    """Fetch page using requests, falling back to Playwright if needed."""
     logger.debug(f"Fetching page: {url}")
     
     # Try requests first
@@ -325,7 +329,6 @@ def fetch_page(url: str) -> Optional[str]:
         logger.info(f"Requests failed {REQUESTS_FAILURE_THRESHOLD} times for {url}. Switching to Playwright.")
         # Run Playwright in an event loop
         try:
-            import asyncio
             loop = asyncio.get_event_loop()
             if loop.is_closed():
                 loop = asyncio.new_event_loop()
@@ -335,7 +338,7 @@ def fetch_page(url: str) -> Optional[str]:
             logger.error(f"Playwright fallback failed for {url}: {str(e)}")
             return None
         if content:
-            REQUESTS['url'] = 0  # Reset failure count on success
+            REQUESTS_FAILURES[url] = 0  # Reset failure count on success
             return content
     
     if content is None:
@@ -345,19 +348,17 @@ def fetch_page(url: str) -> Optional[str]:
     return content
 
 def extract_dates(text: str) -> List[datetime]:
-    """
-    Extract dates from text.
-    """
+    """Extract dates from text."""
     if not text:
         return []
     
-    month_names = r'(?:January|February|March|April|May|July|June|August|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Dec|Nov)
+    month_names = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
     patterns = [
-        r'\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b',
-        r'\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|May|Jun|Jul|Jul|Sep|Oct|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})\b',
-        r'\b'(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b',
-        r'\b(January|February|March|April|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b',
-        r'\b'(Jan|Feb|Mar|Apr|Apr|May|May|Jun|Jul|Jul|Sep|Oct|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b'
+        r'\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b',  # e.g., 12/31/2023 or 12-31-2023
+        r'\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\b',  # e.g., 31 Dec 2023
+        r'\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b',  # e.g., 2023-12-31
+        r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b',  # e.g., December 31st 2023
+        r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b'  # e.g., Dec 31 2023
     ]
     dates = []
     current_year = datetime.now().year
@@ -366,7 +367,7 @@ def extract_dates(text: str) -> List[datetime]:
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             try:
-                dt = date_parse(match.group(0), dayfirst=True, yearfirst=True)
+                dt = date_parse(match.group(0), dayfirst=True, yearfirst=False)
                 if dt.year == current_year and dt.month == current_month:
                     dates.append(dt)
             except ValueError:
@@ -394,7 +395,7 @@ def generate_content_hash(text: str) -> str:
     """Generate content hash for text."""
     normalized = re.sub(r'\s+', ' ', text.strip().lower())
     normalized = re.sub(r'\d+', '', normalized)
-    normalized = re.sub(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', '', normalized)
+    normalized = re.sub(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', '', normalized, flags=re.IGNORECASE)
     return str(hash(normalized))
 
 def generate_semantic_hash(text: str) -> str:
@@ -429,3 +430,41 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
                 a.find_next_sibling(text=True).strip() if a.find_next_sibling(text=True) else '',
                 a.parent.get_text(" ", strip=True) if a.parent else ''
             ]
+            for candidate in candidates:
+                dates.extend(extract_dates(candidate))
+        if not is_relevant_notification(text):
+            continue
+        notification_id = generate_content_hash(text + href)
+        semantic_hash = generate_semantic_hash(text)
+        if is_notification_sent(notification_id, semantic_hash):
+            continue
+        extracted_date = dates[0].strftime('%Y-%m-%d') if dates else datetime.now().strftime('%Y-%m-%d')
+        notification = {
+            'id': notification_id,
+            'url': href,
+            'text': text,
+            'date': extracted_date
+        }
+        notifications.append(notification)
+        mark_notification_sent(url, notification_id, notification_id, semantic_hash, text, extracted_date)
+        if len(notifications) >= MAX_NOTIFICATIONS_PER_URL:
+            break
+    
+    return notifications
+
+def main():
+    """Main function to process URLs and extract notifications."""
+    init_db()
+    cleanup_old_entries()
+    
+    for url in URLS:
+        logger.info(f"Processing URL: {url}")
+        html = fetch_page(url)
+        if html:
+            notifications = extract_notifications(url, html)
+            for notification in notifications:
+                logger.info(f"Found notification: {notification['text']} | URL: {notification['url']} | Date: {notification['date']}")
+        time.sleep(DELAY_BETWEEN_REQUESTS)
+
+if __name__ == "__main__":
+    main()
