@@ -4,8 +4,6 @@ import sqlite3
 import os
 import re
 import random
-import asyncio
-import aiohttp
 import requests
 import json
 import xml.etree.ElementTree as ET
@@ -22,6 +20,7 @@ from urllib.parse import urljoin, urlparse
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from url import URLS  # Import URLs from url.py file
+import time
 
 # Configure structured logging
 structlog.configure(
@@ -103,9 +102,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
 ]
 
-# Track consecutive aiohttp failures per URL
-AIOHTTP_FAILURES = {url: 0 for url in URLS}
-AIOHTTP_FAILURE_THRESHOLD = 3  # Switch to requests after 3 failures
+# Track consecutive requests failures per URL
+REQUESTS_FAILURES = {url: 0 for url in URLS}
+REQUESTS_FAILURE_THRESHOLD = 3  # Switch to Playwright after 3 failures
 
 def save_cookies(cookies: Dict):
     """Save cookies to file."""
@@ -257,10 +256,13 @@ async def fetch_with_playwright(url: str) -> Optional[str]:
         return None
 
 def fetch_with_requests(url: str) -> Optional[str]:
-    """Fetch page using requests (final fallback)."""
-    logger.info(f"Using requests fallback for {url}")
+    """Fetch page using requests."""
+    logger.info(f"Fetching page with requests: {url}")
+    if not url.startswith(('http://', 'https://')):
+        url = f'https://{url}'
+    
     session = requests.Session()
-    retries = Retry(total=1, backoff_factor=0.1, status_forcelist=[429])
+    retries = Retry(total=RETRIES, backoff_factor=0.1, status_forcelist=[429, 500, 502, 503, 504])
     session.mount('http://', HTTPAdapter(max_retries=retries))
     session.mount('https://', HTTPAdapter(max_retries=retries))
     
@@ -279,110 +281,88 @@ def fetch_with_requests(url: str) -> Optional[str]:
             url,
             headers=headers,
             cookies=cookies,
-            timeout=10,
+            timeout=TIMEOUT,
             verify=False,  # Disable SSL verification
             proxies={'http': proxy, 'https': proxy}
         )
         if response.status_code == 403:
             logger.warning(f"403 Forbidden on {url} with requests. Update cookies.")
+            REQUESTS_FAILURES[url] += 1
             return None
         elif response.status_code == 429:
-            logger.warning(f"429 Rate Limit on {url}. Waiting 30s...")
-            time.sleep(30)
+            retry_after = int(response.headers.get('Retry-After', 30))
+            logger.warning(f"429 Rate Limit on {url}. Waiting {retry_after}s...")
+            time.sleep(retry_after)
+            REQUESTS_FAILURES[url] += 1
             return None
         response.raise_for_status()
         content = response.text
         if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
-            logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
+            logger.warning(f"Challenge detected on {url}. Solve manually in Chrome."")
+            REQUESTS_FAILURES['url'] += 1
             return None
         # Save cookies
         save_cookies({c.name: c.value for c in session.cookies})
+        REQUESTS_FAILURES[url] = 0  # Reset failure count on success
+        logger.debug(f"Successfully fetched {url}")
         return content
     except requests.exceptions.RequestException as e:
-        logger.error(f"Requests fallback failed for {url}: {str(e)}")
+        logger.error(f"Requests failed for {url}: {str(e)}"")
+        REQUESTS_FAILURES['url'] += 1
         return None
 
-async def fetch_page(url: str, session: aiohttp.ClientSession) -> Optional[str]:
-    """Fetch page with aiohttp, falling back to Playwright or requests."""
+def fetch_page(url: str) -> Optional[str]:
+    """
+    Fetch page using requests, falling back to Playwright if needed.
+    """
     logger.debug(f"Fetching page: {url}")
-    if not url.startswith(('http://', 'https://')):
-        url = f'https://{url}'
-    headers = {
-        'User-Agent': random.choice(USER_AGENTS),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-        'Referer': 'https://www.google.com/',
-        'Connection': 'keep-alive',
-    }
-    for attempt in range(1, RETRIES + 1):
+    
+    # Try requests first
+    content = fetch_with_requests(url)
+    
+    # Check if requests failures exceed threshold
+    if content is None and REQUESTS_FAILURES.get(url, 0) >= REQUESTS_FAILURE_THRESHOLD:
+        logger.info(f"Requests failed {REQUESTS_FAILURE_THRESHOLD} times for {url}. Switching to Playwright.")
+        # Run Playwright in an event loop
         try:
-            proxy = random.choice(PROXY_POOL) if PROXY_POOL else None
-            async with session.get(
-                url, 
-                headers=headers, 
-                timeout=aiohttp.ClientTimeout(total=TIMEOUT),
-                proxy=proxy,
-                ssl=False  # Disable SSL verification
-            ) as response:
-                logger.debug(f"Received response for {url}: {response.status}")
-                if response.status == 403:
-                    logger.warning(f"403 Forbidden on {url} with aiohttp")
-                    AIOHTTP_FAILURES[url] += 1
-                    break
-                elif response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 30))
-                    logger.warning(f"429 Rate Limit on {url}, retrying after {retry_after}s")
-                    AIOHTTP_FAILURES[url] += 1
-                    await asyncio.sleep(retry_after)
-                    continue
-                response.raise_for_status()
-                content = await response.text(encoding='utf-8', errors='ignore')
-                if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
-                    logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
-                    AIOHTTP_FAILURES[url] += 1
-                    break
-                AIOHTTP_FAILURES[url] = 0  # Reset failure count on success
-                logger.debug(f"Successfully fetched {url}")
-                return content
-        except aiohttp.ClientError as e:
-            logger.warning(f"Attempt {attempt} failed for URL: {url}", error=str(e))
-            AIOHTTP_FAILURES[url] += 1
-            await asyncio.sleep(2 ** attempt)
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout fetching {url}")
-            AIOHTTP_FAILURES[url] += 1
-            break
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            content = loop.run_until_complete(fetch_with_playwright(url))
+        except Exception as e:
+            logger.error(f"Playwright fallback failed for {url}: {str(e)}")
+            return None
+        if content:
+            REQUESTS['url'] = 0  # Reset failure count on success
+            return content
     
-    # Check if aiohttp failures exceed threshold
-    if AIOHTTP_FAILURES[url] >= AIOHTTP_FAILURE_THRESHOLD:
-        logger.info(f"aiohttp failed {AIOHTTP_FAILURE_THRESHOLD} times for {url}. Switching to requests.")
-        return fetch_with_requests(url)
+    if content is None:
+        logger.error(f"All attempts failed for URL: {url}. Try manual cookie extraction.")
+        return None
     
-    # Fallback to Playwright if cookies are available
-    if os.path.exists(COOKIE_FILE):
-        logger.debug(f"Trying Playwright fallback for {url}")
-        playwright_content = await fetch_with_playwright(url)
-        if playwright_content:
-            AIOHTTP_FAILURES[url] = 0  # Reset failure count
-            return playwright_content
-    
-    logger.error(f"All attempts failed for URL: {url}. Try manual cookie extraction.")
-    return None
+    return content
 
 def extract_dates(text: str) -> List[datetime]:
+    """
+    Extract dates from text.
+    """
     if not text:
         return []
-    month_names = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+    
+    month_names = r'(?:January|February|March|April|May|July|June|August|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Dec|Nov)
     patterns = [
         r'\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b',
-        r'\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})\b',
-        r'\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b',
-        r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b',
-        r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b'
+        r'\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|May|Jun|Jul|Jul|Sep|Oct|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})\b',
+        r'\b'(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b',
+        r'\b(January|February|March|April|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b',
+        r'\b'(Jan|Feb|Mar|Apr|Apr|May|May|Jun|Jul|Jul|Sep|Oct|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}\b'
     ]
     dates = []
     current_year = datetime.now().year
     current_month = datetime.now().month
+    
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             try:
@@ -394,6 +374,7 @@ def extract_dates(text: str) -> List[datetime]:
     return dates
 
 def is_relevant_notification(text: str) -> bool:
+    """Check if the text is a relevant notification."""
     if not text or len(text) < MIN_NOTIFICATION_LENGTH or len(text) > MAX_NOTIFICATION_LENGTH:
         return False
     text_lower = text.lower()
@@ -402,31 +383,35 @@ def is_relevant_notification(text: str) -> bool:
     if any(keyword.lower() in text_lower for keyword in KEYWORDS):
         return True
     notification_phrases = [
-        'last date', 'apply online', 'registration', 'download', 'published',
-        'advertisement', 'announcement', 'circular', 'notice', 'apply before',
-        'last date to apply', 'application form', 'admit card', 'result',
-        'extends', 'extended', 'vacancy', 'vacancies', 'candidates', 'exam',
-        'examination', 'declared'
+        'last date', 'apply online', 'registration', 'download', 'published', 'advertisement',
+        'announcement', 'circular', 'notice', 'apply before', 'last date to apply', 
+        'application form', 'admit card', 'result', 'extends', 'extended', 'vacancy', 'vacancies', 
+        'candidates', 'exam', 'examination', 'declared'
     ]
     return any(phrase in text_lower for phrase in notification_phrases)
 
 def generate_content_hash(text: str) -> str:
+    """Generate content hash for text."""
     normalized = re.sub(r'\s+', ' ', text.strip().lower())
     normalized = re.sub(r'\d+', '', normalized)
     normalized = re.sub(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', '', normalized)
     return str(hash(normalized))
 
 def generate_semantic_hash(text: str) -> str:
+    """Generate semantic hash for text."""
     embedding = model.encode(text, convert_to_tensor=True)
     return str(embedding.mean().item())
 
 def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
+    """Extract notifications from HTML content."""
     if not html:
         return []
+    
     soup = BeautifulSoup(html, 'html.parser')
     notifications = []
     current_month = datetime.now().month
     current_year = datetime.now().year
+    
     for a in soup.find_all('a', href=True):
         text = a.get_text(strip=True)
         href = a['href']
@@ -434,7 +419,7 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
             continue
         if not any(keyword.lower() in text.lower() for keyword in KEYWORDS):
             continue
-        if href.startswith("/"):
+        if href.startswith('/'):
             href = urljoin(url, href)
         dates = extract_dates(text)
         if not dates:
@@ -444,257 +429,3 @@ def extract_notifications(url: str, html: str) -> List[Dict[str, str]]:
                 a.find_next_sibling(text=True).strip() if a.find_next_sibling(text=True) else '',
                 a.parent.get_text(" ", strip=True) if a.parent else ''
             ]
-            for candidate in candidates:
-                dates = extract_dates(candidate)
-                if dates:
-                    break
-        if not dates:
-            continue
-        most_recent_date = max(dates)
-        content_hash = generate_content_hash(text)
-        semantic_hash = generate_semantic_hash(text)
-        notification_id = f"{url}:{content_hash}"
-        is_pdf = href.lower().endswith(".pdf")
-        notification_text = (
-            f"{'PDF' if is_pdf else 'Post'}: {text}\n"
-            f"{'PDF Link' if is_pdf else 'Link'}: {href}"
-        )
-        notifications.append({
-            'id': notification_id,
-            'url': url,
-            'text': notification_text,
-            'date': most_recent_date.strftime('%Y-%m-%d'),
-            'content_hash': content_hash,
-            'semantic_hash': semantic_hash
-        })
-        if len(notifications) >= MAX_NOTIFICATIONS_PER_URL:
-            break
-    return notifications
-
-async def send_telegram_notification(notification: Dict[str, str], url: str) -> bool:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.error("Telegram credentials not configured")
-        return False
-    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    retry_delay = 1
-    formatted_msg = (
-        f"New Notification\n\n"
-        f"Source: {url}\n"
-        f"Date: {notification['date']}\n\n"
-        f"Content:\n{notification['text']}\n\n"
-        f"View Original: {url}"
-    )
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': formatted_msg,
-        'parse_mode': 'Markdown',
-        'disable_web_page_preview': True
-    }
-    while retry_delay < 60:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(telegram_url, json=payload, timeout=30) as response:
-                    if response.status == 200:
-                        return True
-                    elif response.status == 429:
-                        retry_after = int((await response.json()).get('parameters', {}).get('retry_after', 5))
-                        await asyncio.sleep(retry_after)
-                        continue
-                    logger.error(f"Telegram API error: {await response.text()}")
-                    return False
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {str(e)}")
-            await asyncio.sleep(retry_delay)
-            retry_delay *= 2
-    return False
-
-async def check_robots_txt(url: str, session: aiohttp.ClientSession) -> Tuple[bool, float]:
-    if not RESPECT_ROBOTS:
-        logger.debug(f"Skipping robots.txt check for {url} (respect_robots=False)")
-        return True, DELAY_BETWEEN_REQUESTS
-    parsed = urlparse(url)
-    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-    logger.debug(f"Checking robots.txt at {robots_url}")
-    try:
-        async with session.get(robots_url, timeout=10, ssl=False) as response:
-            logger.debug(f"robots.txt response for {robots_url}: {response.status}")
-            if response.status == 200:
-                content = await response.text()
-                if f"User-agent: {USER_AGENT.split('/')[0]}" in content:
-                    if "Disallow: /" in content:
-                        logger.info(f"robots.txt disallows crawling for {url}")
-                        return False, 0
-                    delay_match = re.search(r"Crawl-delay:\s*(\d+)", content)
-                    if delay_match:
-                        delay = float(delay_match.group(1))
-                        logger.debug(f"Found crawl-delay: {delay}s for {url}")
-                        return True, delay
-                logger.debug(f"No specific restrictions in robots.txt for {url}")
-                return True, DELAY_BETWEEN_REQUESTS
-            return True, DELAY_BETWEEN_REQUESTS
-    except Exception as e:
-        logger.warning(f"Failed to fetch robots.txt for {url}", error=str(e))
-        return True, DELAY_BETWEEN_REQUESTS
-
-async def fetch_rss_feed(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
-    parsed = urlparse(url)
-    base_url = f"{parsed.scheme}://{parsed.netloc}"
-    feed_paths = [
-        "/feed", "/rss", "/atom.xml", "/feed.xml", "/rss.xml",
-        "/notifications/feed", "/news/feed"
-    ]
-    for path in feed_paths:
-        feed_url = urljoin(base_url, path)
-        logger.debug(f"Attempting to fetch RSS feed at {feed_url}")
-        try:
-            async with session.get(feed_url, timeout=RSS_TIMEOUT, ssl=False) as response:
-                if response.status == 200:
-                    content = await response.text()
-                    logger.debug(f"Successfully fetched RSS feed at {feed_url}")
-                    return parse_feed(content, base_url)
-        except Exception as e:
-            logger.debug(f"Failed to fetch RSS feed at {feed_url}", error=str(e))
-    logger.debug(f"No valid RSS feeds found for {url}")
-    return None
-
-def parse_feed(content: str, base_url: str) -> List[Dict]:
-    items = []
-    try:
-        root = ET.fromstring(content)
-        for item in root.findall('.//item') or root.findall('.//entry'):
-            title = item.findtext('title', '').strip()
-            link = item.findtext('link', '').strip()
-            description = item.findtext('description', '') or item.findtext('content:encoded', '') or ''
-            pub_date = item.findtext('pubDate', '') or item.findtext('published', '')
-            if not link.startswith('http'):
-                link = urljoin(base_url, link)
-            if title:
-                items.append({
-                    'title': title,
-                    'url': link,
-                    'text': f"{title}\n\n{description}",
-                    'date': pub_date
-                })
-    except Exception as e:
-        logger.error("Failed to parse feed", error=str(e))
-    return items
-
-async def fetch_sitemap(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
-    parsed = urlparse(url)
-    sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
-    logger.debug(f"Attempting to fetch sitemap at {sitemap_url}")
-    try:
-        async with session.get(sitemap_url, timeout=SITEMAP_TIMEOUT, ssl=False) as response:
-            if response.status == 200:
-                content = await response.text()
-                logger.debug(f"Successfully fetched sitemap at {sitemap_url}")
-                return parse_sitemap(content)
-        logger.debug(f"Sitemap not found at {sitemap_url}")
-    except Exception as e:
-        logger.debug(f"Failed to fetch sitemap at {sitemap_url}", error=str(e))
-    return None
-
-def parse_sitemap(content: str) -> List[Dict]:
-    items = []
-    try:
-        root = ET.fromstring(content)
-        namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-        for url in root.findall('.//ns:url', namespace):
-            loc = url.findtext('ns:loc', '').strip()
-            lastmod = url.findtext('ns:lastmod', '').strip()
-            if loc and any(keyword in loc.lower() for keyword in KEYWORDS):
-                items.append({
-                    'url': loc,
-                    'date': lastmod
-                })
-    except Exception as e:
-        logger.error("Failed to parse sitemap", error=str(e))
-    return items
-
-async def process_url(url: str, session: aiohttp.ClientSession) -> Optional[List[Dict]]:
-    logger.info(f"Processing URL: {url}")
-    allowed, delay = await check_robots_txt(url, session)
-    if not allowed:
-        logger.info(f"Skipping {url} due to robots.txt restrictions")
-        return None
-    total_delay = delay + random.uniform(0, 60)  # Randomize delay up to 1 minute for testing
-    logger.info(f"Waiting {total_delay:.2f}s before fetching {url} (robots.txt delay: {delay}s)")
-    await asyncio.sleep(total_delay)
-    logger.debug(f"Finished waiting, proceeding to fetch {url}")
-    rss_items = await fetch_rss_feed(url, session)
-    if rss_items:
-        logger.debug(f"Found {len(rss_items)} items in RSS feed for {url}")
-        return rss_items
-    sitemap_items = await fetch_sitemap(url, session)
-    if sitemap_items:
-        logger.debug(f"Found {len(sitemap_items)} relevant items in sitemap for {url}")
-        return sitemap_items
-    logger.debug(f"Falling back to HTML scraping for {url}")
-    html = await fetch_page(url, session)
-    if html:
-        return extract_notifications(url, html)
-    logger.warning(f"No content retrieved for {url}")
-    return None
-
-async def monitor_urls(urls: List[str]):
-    logger.info(f"Starting monitor_urls with {len(urls)} URLs")
-    init_db()
-    cleanup_old_entries()
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-    async def process_with_semaphore(url):
-        async with semaphore:
-            async with aiohttp.ClientSession(cookies=load_cookies()) as session:
-                return await process_url(url, session)
-    while True:
-        logger.info("Starting new monitoring cycle")
-        tasks = [process_with_semaphore(url) for url in urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for url, result in zip(urls, results):
-            if isinstance(result, Exception):
-                logger.error(f"Failed to process URL: {url}", error=str(result))
-                continue
-            elif not result:
-                logger.debug(f"No notifications found for {url}")
-                continue
-            logger.debug(f"Processing {len(result)} notifications for {url}")
-            for notification in result:
-                if 'content_hash' not in notification:
-                    text = notification.get('text', notification.get('title', ''))
-                    notification['content_hash'] = generate_content_hash(text)
-                    notification['semantic_hash'] = generate_semantic_hash(text)
-                    notification['id'] = f"{url}:{notification['content_hash']}"
-                if is_notification_sent(notification['content_hash'], notification['semantic_hash']):
-                    logger.debug(f"Notification already sent: {notification['id']}")
-                    continue
-                if await send_telegram_notification(notification, url):
-                    mark_notification_sent(
-                        url=url,
-                        notification_id=notification['id'],
-                        content_hash=notification['content_hash'],
-                        semantic_hash=notification['semantic_hash'],
-                        text=notification.get('text', ''),
-                        date=notification.get('date', 'No date')
-                    )
-                    logger.info(f"Sent notification: {notification['id']}")
-                else:
-                    logger.error(f"Failed to send notification: {notification['id']}")
-        cycle_delay = random.uniform(DELAY_BETWEEN_REQUESTS, DELAY_BETWEEN_REQUESTS + 60)
-        logger.info(f"Waiting {cycle_delay:.2f}s before next monitoring cycle")
-        await asyncio.sleep(cycle_delay)
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Website Notification Monitor")
-    parser.add_argument('--urls', nargs='+', help="Optional: Override URLs from url.py")
-    parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help="Logging level")
-    args = parser.parse_args()
-    logging.basicConfig(level=args.log_level)
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.error("Telegram credentials not configured")
-        exit(1)
-    urls_to_monitor = args.urls if args.urls else URLS
-    if not urls_to_monitor:
-        logger.error("No URLs provided")
-        exit(1)
-    logger.info(f"Starting monitoring for {len(urls_to_monitor)} URLs")
-    asyncio.run(monitor_urls(urls_to_monitor))
