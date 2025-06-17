@@ -298,7 +298,7 @@ def fetch_with_requests(url: str) -> Optional[str]:
         response.raise_for_status()
         content = response.text
         if any(term in content.lower() for term in ["captcha", "verify you are not a robot", "cloudflare"]):
-            logger.warning(f"Challenge detected on {url}. Solve manually in Chrome."")
+            logger.warning(f"Challenge detected on {url}. Solve manually in Chrome.")
             REQUESTS_FAILURES['url'] += 1
             return None
         # Save cookies
