@@ -307,7 +307,7 @@ def fetch_with_requests(url: str) -> Optional[str]:
         logger.debug(f"Successfully fetched {url}")
         return content
     except requests.exceptions.RequestException as e:
-        logger.error(f"Requests failed for {url}: {str(e)}"")
+        logger.error(f"Requests failed for {url}: {str(e)}")
         REQUESTS_FAILURES['url'] += 1
         return None
 
