@@ -8,7 +8,7 @@ from url import urls
 from transformers import pipeline
 
 # Load environment variables
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 SENT_FILE = "sent_links.txt"
 
