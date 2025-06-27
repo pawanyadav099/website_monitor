@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import os
 import re
 from datetime import datetime
-from url import urls
+from urls import urls
 from transformers import pipeline
 
 # Load environment variables
