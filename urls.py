@@ -1,4 +1,4 @@
 # url.py
-URLS = [
+urls = [
           "https://ssc.nic.in/"
         ]
