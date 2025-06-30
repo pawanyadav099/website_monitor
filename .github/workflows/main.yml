@@ -23,6 +23,6 @@ jobs:
 
       - name: Run website_monitor
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TOKEN: ${{ secrets.TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python a.py
