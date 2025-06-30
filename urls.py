@@ -29,20 +29,20 @@ urls = [
             "https://portal-psc.ap.gov.in/HomePages/RecruitmentNotifications",
             "arunachalpradesh.gov.in",
             #assam
-            "https://www.assamcareer.com/",
-            "https://slprbassam.in/"
+            "https://slprbassam.in/",
             "https://nhm.assam.gov.in/portlets/recruitment",
+            "https://apsc.nic.in/advt_2025.php#advertisement",
             #bihar
             "https://shs.bihar.gov.in/Advertisement",
-            "https://csbc.bihar.gov.in/"
-            "https://bpsc.bihar.gov.in/"
+            "https://csbc.bihar.gov.in/",
+            "https://bpsc.bihar.gov.in/",
             #chattisgarh
             "https://erojgar.cg.gov.in/LandingSite/en/Dist_Recruitments.aspx",
-            "https://psc.cg.gov.in/htm/online_application.html"
-            "https://psc.cg.gov.in/htm/notification%20-%20Latest.html"
-            "https://psc.cg.gov.in/htm/notice_board%20-%20Latest.html"
-            "https://psc.cg.gov.in/htm/Advertisement%20-%20Latest.htm"
-            "https://psc.cg.gov.in/htm/Results%20-%20Latest.html"
+            "https://psc.cg.gov.in/htm/online_application.html",
+            "https://psc.cg.gov.in/htm/notification%20-%20Latest.html",
+            "https://psc.cg.gov.in/htm/notice_board%20-%20Latest.html",
+            "https://psc.cg.gov.in/htm/Advertisement%20-%20Latest.htm",
+            "https://psc.cg.gov.in/htm/Results%20-%20Latest.html",
             "https://balod.gov.in/en/notice_category/recruitment/",
             "https://balodabazar.gov.in/en/notice_category/recruitment/",
             "https://balrampur.gov.in/en/notice_category/recruitment/",
