@@ -79,11 +79,18 @@ def check_site(url, sent_links):
         current_month = datetime.now().month
         current_year = datetime.now().year
 
+        keywords = [
+            "notification", "recruitment", "notice", "result", "results",
+            "admission", "admit card", "released", "vacancy", "post",
+            "posts", "examination", "vacancies", "declared", "interview",
+            "answer key", "important"
+        ]
+
         for link in links:
             text = link.get_text(strip=True)
             href = link.get("href")
 
-            if href and ("notification" in text.lower() or "recruitment" in text.lower()):
+            if href and any(kw in text.lower() for kw in keywords):
                 full_link = requests.compat.urljoin(url, href)
                 print(f"[10] Potential match: {text}")
 
