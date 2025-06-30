@@ -47,7 +47,8 @@ def send_telegram(message):
     }
     try:
         print(f"[7] Sending Telegram message: {message[:60]}...")
-        requests.post(url, data=payload)
+        r = requests.post(url, data=payload)
+        print(f"[7.1] Telegram API response: {r.text}")  # Show response for debugging
     except Exception as e:
         print("[ERROR] Telegram Error:", e)
 
