@@ -10,7 +10,7 @@ from transformers import pipeline
 print("[1] Starting script")
 
 # Load environment variables
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 SENT_FILE = "sent_links.txt"
 print("[2] Environment variables loaded")
