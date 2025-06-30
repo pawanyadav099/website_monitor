@@ -15,6 +15,24 @@ CHAT_ID = os.getenv("CHAT_ID")
 SENT_FILE = "sent_links.txt"
 print("[2] Environment variables loaded")
 
+# Send message to Telegram bot
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    try:
+        print(f"[7] Sending Telegram message: {message[:60]}...")
+        r = requests.post(url, data=payload)
+        print(f"[7.1] Telegram API response: {r.text}")  # Show response for debugging
+    except Exception as e:
+        print("[ERROR] Telegram Error:", e)
+
+# Notify script has started
+send_telegram("Script has started")
+
 # Load AI classifier for smart filtering and date inference
 print("[3] Loading AI model... please wait")
 classifier = pipeline("zero-shot-classification", model="valhalla/distilbart-mnli-12-1")
@@ -36,21 +54,6 @@ def save_sent_link(link):
     with open(SENT_FILE, "a") as f:
         f.write(link + "\n")
     print(f"[6] Saved link: {link}")
-
-# Send message to Telegram bot
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    try:
-        print(f"[7] Sending Telegram message: {message[:60]}...")
-        r = requests.post(url, data=payload)
-        print(f"[7.1] Telegram API response: {r.text}")  # Show response for debugging
-    except Exception as e:
-        print("[ERROR] Telegram Error:", e)
 
 # Try to extract a date from the notification text
 def extract_date(text):
