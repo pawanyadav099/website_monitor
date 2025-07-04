@@ -115,7 +115,6 @@ urls = [
             #Maharashtra
             "https://mpsc.gov.in/adv_notification/8",
             "https://www.maharashtra.gov.in/Site/1548/Jobs",
-            "https://mahasarkar.co.in/government-jobs/",
             "https://mahabharti.in/nmk-district-wise-jobs/",
             "https://bankofmaharashtra.in/current-openings",
             #Manipur
@@ -145,7 +144,6 @@ urls = [
             "https://www.ppsc.gov.in/TAB/SHOWTABLINKS.ASPX?SHOWTABID=24",
             "https://www.pgrkam.com/",
             "https://punjab.gov.in/impnotifications/",
-            "https://punjabjobalert.com/",
             "https://www.pspcl.in/Recruitment",
             #Rajasthan
             "https://recruitment.rajasthan.gov.in/recruitmentservlet",
