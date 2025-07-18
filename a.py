@@ -96,7 +96,7 @@ def check_site(url, sent_links):
         keywords = [
             "notification", "recruitment", "notice", "result", "results",
             "admission", "admit card", "released", "vacancy", "post",
-            "posts", "examination", "vacancies", "declared", "interview",
+            "posts", "examination", "vacancies", "declared", "interview", "Advt.",
             "answer key", "important"
         ]
 
