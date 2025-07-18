@@ -31,6 +31,7 @@ urls = [
             #assam
             "https://slprbassam.in/",
             "https://nhm.assam.gov.in/portlets/recruitment",
+            "https://nhmssd.assam.gov.in/eHRMIS_latest/Recruitments/",
             "https://apsc.nic.in/advt_2025.php#advertisement",
             #bihar
             "https://shs.bihar.gov.in/Advertisement",
