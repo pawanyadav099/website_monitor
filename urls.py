@@ -98,6 +98,7 @@ urls = [
             #Jharkhand
             "https://www.jpsc.gov.in/Examination-Links.php",
             "https://ranchi.nic.in/notice_category/recruitment/",
+            "https://www.jpsc.gov.in/online_application.php",
             "https://www.sameti.org/vaccancy.php",
             "https://sahibganj.nic.in/notice_category/recruitment/",
             "https://giridih.nic.in/notice_category/recruitment/",
