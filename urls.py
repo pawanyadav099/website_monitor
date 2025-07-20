@@ -102,6 +102,7 @@ urls = [
             "https://www.sameti.org/vaccancy.php",
             "https://sahibganj.nic.in/notice_category/recruitment/",
             "https://giridih.nic.in/notice_category/recruitment/",
+            "https://www.jhpolice.gov.in/recruitments",
             #karnatak
             "https://kpsc.kar.nic.in/",
             #Keral
