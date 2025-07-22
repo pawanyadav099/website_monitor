@@ -152,27 +152,32 @@ urls = [
             "https://www.pgrkam.com/",
             "https://punjab.gov.in/impnotifications/",
             "https://www.pspcl.in/Recruitment",
+            "https://www.punjabpolice.gov.in/Recruitment25.aspx",
             #Rajasthan
             "https://recruitment.rajasthan.gov.in/recruitmentservlet",
             "https://rpsc.rajasthan.gov.in/advertisements",
             "https://rpsc.rajasthan.gov.in/answerkeys",
             "https://rpsc.rajasthan.gov.in/results",
             "https://rpsc.rajasthan.gov.in/downloads",
-            "https://sarkariprep.in/rajasthan-govt-jobs/",
+            "https://police.rajasthan.gov.in/portal/RecruitmentsResults",
+            
             #Sikkim
             "https://spsc.sikkim.gov.in/Advertisement.html",
             "https://spsc.sikkim.gov.in/Notices.html",
             "https://www.sikkim.gov.in/media/employment-news",
             "https://hcs.gov.in/hcs/recruitment",
+            "https://police.sikkim.gov.in/visitor/notifications",
             #Tamilnadu
             "https://tnpsc.gov.in/english/notification.aspx",
             "https://www.tnpsc.gov.in/english/latest_results.aspx",
+            "https://eservices.tnpolice.gov.in/CCTNSNICSDC/Recruitment",
             #Telangana
             "https://websitenew.tspsc.gov.in/notifications",
             "https://websitenew.tspsc.gov.in/Results",
             "https://websitenew.tspsc.gov.in/GOS.jsp",
             "https://mhsrb.telangana.gov.in/MHSRB/home.htm",
             "https://tshc.gov.in/showChildDocTypes?id=95",
+            "https://www.tgprb.in/",
             #Tripura
             "https://tripura.gov.in/recruitments",
             "https://health.tripura.gov.in/jobs-and-recruitment",
