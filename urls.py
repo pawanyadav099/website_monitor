@@ -103,12 +103,15 @@ urls = [
             "https://sahibganj.nic.in/notice_category/recruitment/",
             "https://giridih.nic.in/notice_category/recruitment/",
             "https://www.jhpolice.gov.in/recruitments",
+            "https://www.jhpolice.gov.in/recruitments",
             #karnatak
             "https://kpsc.kar.nic.in/",
+            "https://ksp.karnataka.gov.in/info-3/Recruitment/en",
             #Keral
             "https://www.keralapsc.gov.in/notifications",
             "https://jobs.kpesrb.kerala.gov.in/index.php/LatestNotifications",
             "https://cmd.kerala.gov.in/recruitment/",
+            "https://keralapolice.gov.in/page/notification",
             #Madhya Pradesh
             "https://mppsc.mp.gov.in/Advertisement",
             "https://www.kirannewsagency.com/job/madhya-pradesh-govt-job.aspx",
@@ -119,6 +122,7 @@ urls = [
             "https://mpsc.gov.in/adv_notification/8",
             "https://www.maharashtra.gov.in/Site/1548/Jobs",
             "https://mahabharti.in/nmk-district-wise-jobs/",
+            "https://www.mahapolice.gov.in/police-recruitment.php",
             "https://bankofmaharashtra.in/current-openings",
             #Manipur
             "https://mpscmanipur.gov.in/Active_exam.html",
