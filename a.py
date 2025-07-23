@@ -1,18 +1,17 @@
-# main.py
 import requests
 from bs4 import BeautifulSoup
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from urls import urls
 from transformers import pipeline
 
 print("[1] Starting script")
 
 # Load environment variables
-TOKEN = os.getenv("TOKEN")  # Telegram bot token from environment
-CHAT_ID = os.getenv("CHAT_ID")  # Telegram chat/channel ID from environment
-SENT_FILE = "sent_links.txt"  # File to track already sent links
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+SENT_FILE = "sent_links.txt"
 print("[2] Environment variables loaded")
 
 # Send message to Telegram bot
@@ -38,7 +37,7 @@ print("[3] Loading AI model... please wait")
 classifier = pipeline("zero-shot-classification", model="valhalla/distilbart-mnli-12-1")
 print("[4] AI model loaded successfully")
 
-# Load sent links to avoid duplication
+# Load sent links
 def load_sent_links():
     try:
         with open(SENT_FILE, "r") as f:
@@ -49,7 +48,7 @@ def load_sent_links():
         print("[5] sent_links.txt not found, starting fresh")
         return set()
 
-# Save a sent link to avoid resending it
+# Save sent link
 def save_sent_link(link):
     with open(SENT_FILE, "a") as f:
         f.write(link + "\n")
@@ -72,7 +71,7 @@ def extract_date(text):
         month = datetime.strptime(month_str, "%B").month
         return datetime(int(year), month, 1).date()
 
-    # YYYYMMDD or YYYY-MM-DD
+    # YYYYMMDD or YYYY-MM-DD in URL or filenames
     match = re.search(r'(\d{4})[-/]?(\d{2})[-/]?(\d{2})', text)
     if match:
         year, month, day = map(int, match.groups())
@@ -81,28 +80,7 @@ def extract_date(text):
 
     return None
 
-# Check if date is in the current week
-def is_current_week(date):
-    if not date:
-        return False
-    today = datetime.now().date()
-    start_of_week = today - timedelta(days=today.weekday())
-    end_of_week = start_of_week + timedelta(days=6)
-    return start_of_week <= date <= end_of_week
-
-# Use AI to judge if a notification is important
-def is_important_with_ai(text):
-    try:
-        labels = ["important", "not important"]
-        result = classifier(text, candidate_labels=labels)
-        score = result['scores'][0]
-        print(f"[13] AI decision: {result['labels'][0]} ({score:.2f})")
-        return result['labels'][0] == "important" and score > 0.5
-    except Exception as e:
-        print("[ERROR] AI classification failed:", e)
-        return False
-
-# Process each URL
+# Process each site
 def check_site(url, sent_links):
     print(f"[8] Checking site: {url}")
     try:
@@ -111,11 +89,14 @@ def check_site(url, sent_links):
         links = soup.find_all("a")
         print(f"[9] Found {len(links)} links")
 
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+
         keywords = [
             "notification", "recruitment", "notice", "result", "results",
             "admission", "admit card", "released", "vacancy", "post",
-            "posts", "examination", "vacancies", "declared", "interview",
-            "answer key", "important", "advt."
+            "posts", "examination", "vacancies", "declared", "interview", "Advt.",
+            "answer key", "important"
         ]
 
         for link in links:
@@ -131,17 +112,14 @@ def check_site(url, sent_links):
                 date_url = extract_date(full_link)
                 date = date_text or date_url
 
-                # Send if date is in current week
                 if date:
                     print(f"[11] Extracted date: {date}")
-                    if not is_current_week(date):
-                        print("[12] Skipped due to not in current week")
+                    if date.month != current_month or date.year != current_year:
+                        print("[12] Skipped due to non-current month")
                         continue
                 else:
-                    print("[12] No date found, using AI to decide")
-                    if not is_important_with_ai(text):
-                        print("[12.1] Skipped due to AI decision")
-                        continue
+                    print("[12] Skipped due to no date found")
+                    continue
 
                 if full_link not in sent_links:
                     send_telegram(f"<b>{text}</b>\n{full_link}")
@@ -153,13 +131,12 @@ def check_site(url, sent_links):
     except Exception as e:
         print(f"[ERROR] Failed to scrape {url}: {e}")
 
-# Main entry point
+# Main entry
 def run_monitor():
-    sent_links = load_sent_links()  # Load already sent links
+    sent_links = load_sent_links()
     for url in urls:
-        check_site(url, sent_links)  # Check each site
+        check_site(url, sent_links)
 
-# Start the script
 if __name__ == "__main__":
     run_monitor()
     print("[16] Script finished")
