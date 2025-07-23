@@ -219,6 +219,7 @@ urls = [
             "https://psc.wb.gov.in/written_test.jsp",
             "https://wbprb.applythrunet.co.in/",
             "https://www.wbhealth.gov.in/pages/career",
+            "https://www.rrchubli.in/",
             #Jammu Kashmir
             "https://jkpsc.nic.in/",
             "https://jkpsc.nic.in/Static/forms/Key.html",
