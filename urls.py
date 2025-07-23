@@ -28,7 +28,9 @@ urls = [
             "https://portal-psc.ap.gov.in/",
             "https://portal-psc.ap.gov.in/HomePages/RecruitmentNotifications",
             "arunachalpradesh.gov.in",
+            #PSU_websites 
             "https://www.hal-india.co.in/career",
+            "https://udupicsl.com/index.php/careers/",
             #assam
             "https://slprbassam.in/",
             "https://nhm.assam.gov.in/portlets/recruitment",
