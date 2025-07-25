@@ -1,6 +1,7 @@
 # url.py
 urls = [
             "https://india.gov.in",
+            "https://www.mha.gov.in/en",
             "https://ssc.nic.in/Portal/Notices",
             "https://upsc.gov.in/recruitment/recruitment-advertisements",
             "https://rrbahmedabad.gov.in/recruitment-statistics/",
