@@ -226,6 +226,7 @@ urls = [
             "https://www.rrchubli.in/",
             #Jammu Kashmir
             "https://jkpsc.nic.in/",
+            "https://jkssb.nic.in/Advertisement.html",
             "https://jkpsc.nic.in/Static/forms/Key.html",
             "https://jkpsc.nic.in/Static/forms/Active_Exams.html",
             "https://jkpsc.nic.in/Static/forms/recruitment.html",
