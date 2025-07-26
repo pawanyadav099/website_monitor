@@ -32,6 +32,7 @@ urls = [
             #PSU_websites 
             "https://www.hal-india.co.in/career",
             "https://udupicsl.com/index.php/careers/",
+            "https://www.icmr.gov.in/employment-opportunities",
             #assam
             "https://slprbassam.in/",
             "https://nhm.assam.gov.in/portlets/recruitment",
