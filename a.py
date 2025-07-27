@@ -32,7 +32,7 @@ def send_telegram(message):
 # Notify script has started
 send_telegram("✅ Script has started")
 
-# Load AI classifier
+# Load AI classifier (currently unused)
 print("[3] Loading AI model... please wait")
 classifier = pipeline("zero-shot-classification", model="valhalla/distilbart-mnli-12-1")
 print("[4] AI model loaded successfully")
@@ -54,7 +54,7 @@ def save_sent_link(link):
         f.write(link + "\n")
     print(f"[6] Saved link: {link}")
 
-# Extract date from any text string
+# Extract date from any text or URL
 def extract_date(text):
     text = text.lower()
 
@@ -71,7 +71,7 @@ def extract_date(text):
         month = datetime.strptime(month_str, "%B").month
         return datetime(int(year), month, 1).date()
 
-    # YYYYMMDD or YYYY-MM-DD in URL or filenames
+    # YYYYMMDD or YYYY-MM-DD
     match = re.search(r'(\d{4})[-/]?(\d{2})[-/]?(\d{2})', text)
     if match:
         year, month, day = map(int, match.groups())
@@ -89,8 +89,7 @@ def check_site(url, sent_links):
         links = soup.find_all("a")
         print(f"[9] Found {len(links)} links")
 
-        current_month = datetime.now().month
-        current_year = datetime.now().year
+        today = datetime.now().date()
 
         keywords = [
             "notification", "recruitment", "notice", "result", "results",
@@ -107,15 +106,15 @@ def check_site(url, sent_links):
                 full_link = requests.compat.urljoin(url, href)
                 print(f"[10] Potential match: {text}")
 
-                # Try extracting date from both text and URL
+                # Extract date from title and URL
                 date_text = extract_date(text)
                 date_url = extract_date(full_link)
                 date = date_text or date_url
 
                 if date:
                     print(f"[11] Extracted date: {date}")
-                    if date.month != current_month or date.year != current_year:
-                        print("[12] Skipped due to non-current month")
+                    if date != today:
+                        print("[12] Skipped because it's not today's date")
                         continue
                 else:
                     print("[12] Skipped due to no date found")
