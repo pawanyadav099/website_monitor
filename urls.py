@@ -33,6 +33,7 @@ urls = [
             "https://www.hal-india.co.in/career",
             "https://udupicsl.com/index.php/careers/",
             "https://www.icmr.gov.in/employment-opportunities",
+            "https://www.iittp.ac.in/recruitment",
             #assam
             "https://slprbassam.in/",
             "https://nhm.assam.gov.in/portlets/recruitment",
