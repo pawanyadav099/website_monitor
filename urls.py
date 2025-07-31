@@ -7,6 +7,7 @@ urls = [
             "https://rrbahmedabad.gov.in/recruitment-statistics/",
             "https://rrbajmer.gov.in/CenDetails?CEN=Ooc3BlDvsFno9roRQOw73Q%253d%253d",
             "https://rrbald.gov.in/",
+            "https://rrcer.org/notice_board.html",
             "http://www.rrbbnc.gov.in/",
             "https://www.rrbgkp.gov.in/",
             "https://rrbbhopal.gov.in/",
