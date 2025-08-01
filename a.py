@@ -83,11 +83,11 @@ def extract_date(text):
 # Process each site
 def check_site(url, sent_links):
     print(f"[8] Checking site: {url}")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0.0.0 Safari/537.36"
+    }
     try:
-        headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0.0.0 Safari/537.36"
-}
-r = requests.get(url, timeout=20, headers=headers)
+        r = requests.get(url, timeout=20, headers=headers)
         soup = BeautifulSoup(r.text, "html.parser")
         links = soup.find_all("a")
         print(f"[9] Found {len(links)} links")
