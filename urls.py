@@ -35,6 +35,7 @@ urls = [
             "https://udupicsl.com/index.php/careers/",
             "https://www.icmr.gov.in/employment-opportunities",
             "https://www.iittp.ac.in/recruitment",
+            "https://www.ibps.in/index.php/crp-updates/",
             #assam
             "https://slprbassam.in/",
             "https://nhm.assam.gov.in/portlets/recruitment",
