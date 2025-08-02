@@ -97,6 +97,7 @@ urls = [
             "https://nhmharyana.gov.in/page?id=37",
             "https://haryanahealth.gov.in/notice-category/recruitments/",
             "https://advocategeneralhry.gov.in/announcementsadvertisments",
+            "https://hpsc.gov.in/en-us/Instructions",
             #Himachal Pradesh
             "https://himachal.nic.in/en-IN/vacancies.html",
             "http://www.hppsc.hp.gov.in/hppsc/content/Index/?qlid=12&Ls_is=15&lngid=1",
@@ -257,3 +258,4 @@ urls = [
             "https://lakshadweeppolice.gov.in/recruitment",
             "https://lakshadweep.gov.in/notice/recruitment",
         ]
+
