@@ -84,7 +84,9 @@ def extract_date(text):
 def check_site(url, sent_links):
     print(f"[8] Checking site: {url}")
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/115.0.0.0 Safari/537.36"
     }
     try:
         r = requests.get(url, timeout=20, headers=headers)
@@ -92,46 +94,40 @@ def check_site(url, sent_links):
         links = soup.find_all("a")
         print(f"[9] Found {len(links)} links")
 
-        today = datetime.now().date()
-
-        keywords = [
-            "notification", "recruitment", "notice", "result", "results",
-            "admission", "admit card", "released", "vacancy", "post",
-            "posts", "examination", "vacancies", "declared", "interview", "Advt.", "click here", "apply", "exam", "answer key", "important"
-        ]
+        today = datetime.now().date()  # ⬅️ Get today's date
 
         for link in links:
             text = link.get_text(strip=True)
             href = link.get("href")
+            if not href:
+                continue
 
-            if href and any(kw in text.lower() for kw in keywords):
-                full_link = requests.compat.urljoin(url, href)
-                print(f"[10] Potential match: {text}")
+            full_link = requests.compat.urljoin(url, href)
 
-                # Extract date from title and URL
-                date_text = extract_date(text)
-                date_url = extract_date(full_link)
-                date = date_text or date_url
+            # 🔎 Try extracting a date from both link text and URL
+            date_text = extract_date(text)
+            date_url  = extract_date(full_link)
+            date      = date_text or date_url
 
-                if date:
-                    print(f"[11] Extracted date: {date}")
-                    if date != today:
-                        print("[12] Skipped because it's not today's date")
-                        continue
-                else:
-                    print("[12] Skipped due to no date found")
-                    continue
+            if date != today:  # ⬅️ Skip if the date is not today
+                continue
 
-                if full_link not in sent_links:
-                    send_telegram(f"<b>{text}</b>\n{full_link}")
-                    save_sent_link(full_link)
-                    sent_links.add(full_link)
-                else:
-                    print("[15] Skipped duplicate link")
+            # ✅ If today's date is found → send Telegram message
+            if full_link not in sent_links:
+                message = (
+                    f"<b>New notification ({today.strftime('%d-%m-%Y')})</b>\n"
+                    f"Page: {url}\n"
+                    f"Link: {full_link}"
+                )
+                send_telegram(message)
+                save_sent_link(full_link)
+                sent_links.add(full_link)
+            else:
+                print("[15] Skipped duplicate link")
 
     except Exception as e:
         print(f"[ERROR] Failed to scrape {url}: {e}")
-
+        
 # Main entry
 def run_monitor():
     sent_links = load_sent_links()
@@ -141,3 +137,4 @@ def run_monitor():
 if __name__ == "__main__":
     run_monitor()
     print("[16] Script finished")
+
