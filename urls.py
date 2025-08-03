@@ -201,6 +201,7 @@ urls = [
             "https://uppsc.up.nic.in/CandidatePages/Notifications.aspx",
             "https://uppsc.up.nic.in/Default.aspx",
             "https://sewayojan.up.nic.in/jobs.aspx",
+            "https://upsssc.gov.in/News.aspx?id=1",
             "https://www.upcareers.in/up-govt-jobs/",
             "https://upsssc.gov.in/News.aspx?id=1",
             "https://upsssc.gov.in/AllNotifications.aspx",
@@ -258,4 +259,5 @@ urls = [
             "https://lakshadweeppolice.gov.in/recruitment",
             "https://lakshadweep.gov.in/notice/recruitment",
         ]
+
 
