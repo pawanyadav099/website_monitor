@@ -202,13 +202,12 @@ urls = [
             "https://uppsc.up.nic.in/Default.aspx",
             "https://sewayojan.up.nic.in/jobs.aspx",
             "https://upsssc.gov.in/News.aspx?id=1",
-            "https://www.upcareers.in/up-govt-jobs/",
+            "https://uppsc.up.nic.in/FooterPages/Latest-News",
             "https://upsssc.gov.in/News.aspx?id=1",
             "https://upsssc.gov.in/AllNotifications.aspx",
             "https://upsssc.gov.in/Default.aspx",
             "https://uppbpb.gov.in/",
             "https://uppbpb.gov.in/Home/Notice",
-            "https://uppbpb.gov.in/Home/Notice#",
             "https://uppbpb.gov.in/Home/DirectRecruitment",
             "https://uppbpb.gov.in/Home/Result",
             #Uttarakhand
@@ -259,5 +258,6 @@ urls = [
             "https://lakshadweeppolice.gov.in/recruitment",
             "https://lakshadweep.gov.in/notice/recruitment",
         ]
+
 
 
