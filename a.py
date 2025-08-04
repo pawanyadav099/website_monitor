@@ -55,7 +55,7 @@ def save_sent_link(link):
         f.write(link + "\n")
     print(f"[6] Saved link: {link}")
 
-# Extract a date from text using dateutil
+# Extract date using dateutil
 def extract_date(text):
     try:
         dt = dateparser.parse(text, fuzzy=True, dayfirst=True)
@@ -63,7 +63,7 @@ def extract_date(text):
     except Exception:
         return None
 
-# Process a single page without following any links
+# Process a single page (no subpages)
 def check_site(url, sent_links):
     print(f"[8] Checking site: {url}")
     headers = {
@@ -86,20 +86,19 @@ def check_site(url, sent_links):
                 continue
 
             full_link = requests.compat.urljoin(url, href)
-
-            # Extract date from link text or URL
             date_text = extract_date(text)
-            date_url  = extract_date(full_link)
-            date      = date_text or date_url
+            date_url = extract_date(full_link)
+            date = date_text or date_url
 
             if date != today:
                 continue
 
             if full_link not in sent_links:
                 message = (
-                    f"<b>New notification ({today.strftime('%d-%m-%Y')})</b>\n"
-                    f"Page: {url}\n"
-                    f"Link: {full_link}"
+                    f"<b>🆕 New Notification ({today.strftime('%d-%m-%Y')})</b>\n"
+                    f"<b>📄 Page:</b> {url}\n"
+                    f"<b>🔗 Link:</b> <a href='{full_link}'>{full_link}</a>\n"
+                    f"<b>📝 Text:</b> {text or 'No text'}"
                 )
                 send_telegram(message)
                 save_sent_link(full_link)
