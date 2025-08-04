@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from urls import urls
 from transformers import pipeline
+from dateutil import parser
 
 print("[1] Starting script")
 
@@ -54,31 +55,13 @@ def save_sent_link(link):
         f.write(link + "\n")
     print(f"[6] Saved link: {link}")
 
-# Extract date from any text or URL
+# Extract date from any text or URL using dateutil (smart parser)
 def extract_date(text):
-    text = text.lower()
-
-    # DD-MM-YYYY or DD/MM/YYYY
-    match = re.search(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', text)
-    if match:
-        day, month, year = map(int, match.groups())
-        return datetime(year, month, day).date()
-
-    # Month YYYY
-    match = re.search(r'(january|february|march|april|may|june|july|august|september|october|november|december)[\s-]+(\d{4})', text)
-    if match:
-        month_str, year = match.groups()
-        month = datetime.strptime(month_str, "%B").month
-        return datetime(int(year), month, 1).date()
-
-    # YYYYMMDD or YYYY-MM-DD
-    match = re.search(r'(\d{4})[-/]?(\d{2})[-/]?(\d{2})', text)
-    if match:
-        year, month, day = map(int, match.groups())
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            return datetime(year, month, day).date()
-
-    return None
+    try:
+        date = parser.parse(text, fuzzy=True, dayfirst=True)
+        return date.date()
+    except Exception:
+        return None
 
 # Process each site
 def check_site(url, sent_links):
@@ -94,7 +77,7 @@ def check_site(url, sent_links):
         links = soup.find_all("a")
         print(f"[9] Found {len(links)} links")
 
-        today = datetime.now().date()  # ⬅️ Get today's date
+        today = datetime.now().date()
 
         for link in links:
             text = link.get_text(strip=True)
@@ -104,15 +87,18 @@ def check_site(url, sent_links):
 
             full_link = requests.compat.urljoin(url, href)
 
-            # 🔎 Try extracting a date from both link text and URL
+            # Extract date from either text or link
             date_text = extract_date(text)
-            date_url  = extract_date(full_link)
-            date      = date_text or date_url
+            date_url = extract_date(full_link)
+            date = date_text or date_url
 
-            if date != today:  # ⬅️ Skip if the date is not today
+            print(f"[10] Link: {text[:60]} | Date found: {date}")
+
+            # Only send if date is today
+            if not date or date != today:
                 continue
 
-            # ✅ If today's date is found → send Telegram message
+            # Send Telegram if not already sent
             if full_link not in sent_links:
                 message = (
                     f"<b>New notification ({today.strftime('%d-%m-%Y')})</b>\n"
@@ -127,8 +113,8 @@ def check_site(url, sent_links):
 
     except Exception as e:
         print(f"[ERROR] Failed to scrape {url}: {e}")
-        
-# Main entry
+
+# Main entry point
 def run_monitor():
     sent_links = load_sent_links()
     for url in urls:
@@ -137,4 +123,3 @@ def run_monitor():
 if __name__ == "__main__":
     run_monitor()
     print("[16] Script finished")
-
