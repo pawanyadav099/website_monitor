@@ -123,22 +123,18 @@ urls = [
             "https://keralapolice.gov.in/page/notification",
             #Madhya Pradesh
             "https://mppsc.mp.gov.in/Advertisement",
-            "https://www.kirannewsagency.com/job/madhya-pradesh-govt-job.aspx",
             "https://esb.mp.gov.in/e_default.html",
             "https://pam.mp.gov.in/career/archive/",
             "https://iforms.mponline.gov.in/",
             #Maharashtra
             "https://mpsc.gov.in/adv_notification/8",
             "https://www.maharashtra.gov.in/Site/1548/Jobs",
-            "https://mahabharti.in/nmk-district-wise-jobs/",
             "https://www.mahapolice.gov.in/police-recruitment.php",
             "https://bankofmaharashtra.in/current-openings",
             #Manipur
             "https://mpscmanipur.gov.in/Active_exam.html",
             "https://mpscmanipur.gov.in/examination.html",
             "https://mpscmanipur.gov.in/Exam_concluded.html",
-            "https://affairscloud.com/jobs/manipur-govt-job/",
-            "https://linkingsky.com/government-exams/government-jobs-in-manipur.html",
             "https://manipurtourism.gov.in/recruitment/",
             #Meghalaya
             "https://mpsc.nic.in/advertisements.html",
@@ -258,6 +254,7 @@ urls = [
             "https://lakshadweeppolice.gov.in/recruitment",
             "https://lakshadweep.gov.in/notice/recruitment",
         ]
+
 
 
 
