@@ -1,4 +1,3 @@
-
 import requests
 from bs4 import BeautifulSoup
 import os
@@ -136,3 +135,4 @@ def run_monitor():
 if __name__ == "__main__":
     run_monitor()
     print("[16] Script finished")
+
