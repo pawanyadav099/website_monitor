@@ -1,137 +1,258 @@
-import requests
-from bs4 import BeautifulSoup
-import os
-import re
-from datetime import datetime
-from dateutil import parser as dateparser
-from urls import urls
-from transformers import pipeline
-
-print("[1] Starting script")
-
-# Load environment variables
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-SENT_FILE = "sent_links.txt"
-print("[2] Environment variables loaded")
-
-# Telegram send function
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    try:
-        print(f"[7] Sending Telegram message: {message[:60]}...")
-        r = requests.post(url, data=payload)
-        print(f"[7.1] Telegram API response: {r.text}")
-    except Exception as e:
-        print("[ERROR] Telegram Error:", e)
-
-send_telegram("✅ Script has started")
-
-# Load classifier model (future use)
-print("[3] Loading AI model... please wait")
-classifier = pipeline("zero-shot-classification", model="valhalla/distilbart-mnli-12-1")
-print("[4] AI model loaded successfully")
-
-# Load sent links from file
-def load_sent_links():
-    try:
-        with open(SENT_FILE, "r") as f:
-            links = set(f.read().splitlines())
-            print(f"[5] Loaded {len(links)} sent links")
-            return links
-    except FileNotFoundError:
-        print("[5] sent_links.txt not found, starting fresh")
-        return set()
-
-# Save sent link
-def save_sent_link(link):
-    with open(SENT_FILE, "a") as f:
-        f.write(link + "\n")
-    print(f"[6] Saved link: {link}")
-
-# Try extracting a date smartly from any text
-def extract_possible_date(texts):
-    for text in texts:
-        if not text:
-            continue
-        try:
-            date = dateparser.parse(text, fuzzy=True, dayfirst=True)
-            return date.date()
-        except Exception:
-            continue
-    return None
-
-# Main check function
-def check_site(url, sent_links):
-    print(f"[8] Checking site: {url}")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/115.0.0.0 Safari/537.36"
-    }
-
-    try:
-        r = requests.get(url, timeout=20, headers=headers)
-        soup = BeautifulSoup(r.text, "html.parser")
-        links = soup.find_all("a")
-        print(f"[9] Found {len(links)} links")
-
-        today = datetime.now().date()
-
-        for link in links:
-            text = link.get_text(strip=True)
-            href = link.get("href")
-            if not href:
-                continue
-
-            full_link = requests.compat.urljoin(url, href)
-
-            # Try collecting various text areas to detect date
-            nearby_texts = [text, full_link]
-
-            # Add surrounding text (like <td>, <li>, parent, sibling text etc.)
-            parent = link.find_parent()
-            if parent:
-                nearby_texts.append(parent.get_text(strip=True))
-            if link.previous_sibling and hasattr(link.previous_sibling, 'get_text'):
-                nearby_texts.append(link.previous_sibling.get_text(strip=True))
-            if link.next_sibling and hasattr(link.next_sibling, 'get_text'):
-                nearby_texts.append(link.next_sibling.get_text(strip=True))
-
-            # Attempt to extract a valid date
-            found_date = extract_possible_date(nearby_texts)
-
-            if found_date != today:
-                print(f"[10] Skipping: Date {found_date} is not today")
-                continue
-
-            if full_link not in sent_links:
-                message = (
-                    f"<b>🆕 New Notification ({today.strftime('%d-%m-%Y')})</b>\n"
-                    f"<b>📄 Page:</b> {url}\n"
-                    f"<b>🔗 Link:</b> <a href='{full_link}'>{full_link}</a>\n"
-                    f"<b>📝 Text:</b> {text or 'No text found'}"
-                )
-                send_telegram(message)
-                save_sent_link(full_link)
-                sent_links.add(full_link)
-            else:
-                print("[15] Skipped duplicate link")
-
-    except Exception as e:
-        print(f"[ERROR] Failed to scrape {url}: {e}")
-
-# Main entry point
-def run_monitor():
-    sent_links = load_sent_links()
-    for url in urls:
-        check_site(url, sent_links)
-
-if __name__ == "__main__":
-    run_monitor()
-    print("[16] Script finished")
+# url.py
+urls = [
+"https://india.gov.in",
+"https://www.mha.gov.in/en",
+"https://ssc.nic.in/Portal/Notices",
+"https://upsc.gov.in/recruitment/recruitment-advertisements",
+"https://rrbahmedabad.gov.in/recruitment-statistics/",
+"https://rrbajmer.gov.in/CenDetails?CEN=Ooc3BlDvsFno9roRQOw73Q%253d%253d",
+"https://rrbald.gov.in/",
+"https://rrcer.org/notice_board.html",
+"http://www.rrbbnc.gov.in/",
+"https://www.rrbgkp.gov.in/",
+"https://rrbbhopal.gov.in/",
+"https://rrbbhopal.gov.in/",
+"https://rrbbilaspur.gov.in/",
+"https://www.rrbcdg.gov.in/#SkipContent",
+"https://www.rrbchennai.gov.in/",
+"https://www.rrbguwahati.gov.in/",
+"https://www.rrbjammu.nic.in/",
+"https://www.rrbkolkata.gov.in/",
+"https://rrbmalda.gov.in/",
+"https://www.rrbmumbai.gov.in/",
+"https://rrbmuzaffarpur.gov.in/Portal/Default.aspx",
+"https://www.rrbpatna.gov.in/",
+"https://rrbranchi.gov.in/",
+"https://rrbsecunderabad.gov.in/",
+"https://www.rrbsiliguri.gov.in/",
+"https://www.rrbthiruvananthapuram.gov.in/",
+"https://indianrailways.gov.in/railwayboard/view_section.jsp?lang=0&id=0,7,1281",
+"https://portal-psc.ap.gov.in/",
+"https://portal-psc.ap.gov.in/HomePages/RecruitmentNotifications",
+"arunachalpradesh.gov.in",
+#PSU_websites
+"https://www.hal-india.co.in/career",
+"https://udupicsl.com/index.php/careers/",
+"https://www.icmr.gov.in/employment-opportunities",
+"https://www.iittp.ac.in/recruitment",
+"https://www.ibps.in/index.php/crp-updates/",
+#assam
+"https://slprbassam.in/",
+"https://nhm.assam.gov.in/portlets/recruitment",
+"https://nhmssd.assam.gov.in/eHRMIS_latest/Recruitments/",
+"https://apsc.nic.in/advt_2025.php#advertisement",
+#bihar
+"https://shs.bihar.gov.in/Advertisement",
+"https://csbc.bihar.gov.in/",
+"https://bpsc.bihar.gov.in/",
+#chattisgarh
+"https://erojgar.cg.gov.in/LandingSite/en/Dist_Recruitments.aspx",
+"https://psc.cg.gov.in/htm/online_application.html",
+"https://psc.cg.gov.in/htm/notification%20-%20Latest.html",
+"https://psc.cg.gov.in/htm/notice_board%20-%20Latest.html",
+"https://psc.cg.gov.in/htm/Advertisement%20-%20Latest.htm",
+"https://psc.cg.gov.in/htm/Results%20-%20Latest.html",
+"https://balod.gov.in/en/notice_category/recruitment/",
+"https://balodabazar.gov.in/en/notice_category/recruitment/",
+"https://balrampur.gov.in/en/notice_category/recruitment/",
+"https://bastar.gov.in/en/notice_category/recruitment/",
+"https://bemetara.gov.in/en/notice_category/recruitment/",
+"https://bijapur.gov.in/en/notice_category/recruitment/",
+"https://bilaspur.gov.in/en/notice_category/recruitment/",
+"https://dantewada.nic.in/en/notice_category/recruitment/",
+"https://dhamtari.gov.in/en/notice_category/recruitment/",
+"https://durg.gov.in/en/notice_category/recruitment/",
+"https://gariaband.gov.in/en/notice_category/recruitment/",
+"https://gaurela-pendra-marwahi.cg.gov.in/notice_category/recruitment/",
+"https://janjgir-champa.gov.in/en/notice_category/recruitment/",
+"https://jashpur.nic.in/en/notice_category/recruitment/",
+"https://kanker.gov.in/en/notice_category/recruitment/",
+"https://surguja.gov.in/en/notice_category/recruitment/",
+"https://surajpur.gov.in/en/notice_category/recruitment/",
+"https://sukma.gov.in/en/notice_category/recruitment/",
+"https://sarangarh-bilaigarh.cg.gov.in/en/notice_category/recruitment/",
+"https://sakti.cg.gov.in/en/notice_category/recruitment/",
+"https://rajnandgaon.gov.in/en/notice_category/recruitment/",
+"https://raipur.gov.in/en/notice_category/recruitment/",
+"https://raigarh.gov.in/en/notice_category/recruitment/",
+"https://narayanpur.gov.in/en/notice_category/recruitment/",
+"https://mungeli.gov.in/en/notice_category/recruitment/",
+"https://mohla-manpur-ambagarhchowki.cg.gov.in/en/notice_category/recruitment/",
+"https://manendragarh-chirmiri-bharatpur.cg.gov.in/en/notice_category/recruitment/",
+"https://mahasamund.gov.in/en/notice_category/recruitment/",
+"https://korea.gov.in/en/notice_category/recruitment/",
+"https://korba.gov.in/en/notice_category/recruitment/",
+"https://kondagaon.gov.in/en/notice_category/recruitment/",
+"https://s351ef186e18dc00c2d31982567235c559.s3waas.gov.in/notice_category/recruitment/",
+"https://kawardha.gov.in/en/notice_category/recruitment/",
+#Goa
+"https://www.goa.gov.in/citizen/recruitment/",
+"https://goaonline.gov.in/Appln/Uil/DeptServices?__DocId=LEM&__ServiceId=LEM09",
+"https://goatransport.gov.in/Recruitment",
+#Gujrat
+"https://ojas.gujarat.gov.in/AdvtList.aspx?type=lCxUjNjnTp8=",
+"https://services.india.gov.in/service/detail/online-job-application-system-gujarat",
+#Haryana
+"https://hkrnl.itiharyana.gov.in/VacantJobs",
+"https://nhmharyana.gov.in/page?id=37",
+"https://haryanahealth.gov.in/notice-category/recruitments/",
+"https://advocategeneralhry.gov.in/announcementsadvertisments",
+"https://hpsc.gov.in/en-us/Instructions",
+#Himachal Pradesh
+"https://himachal.nic.in/en-IN/vacancies.html",
+"http://www.hppsc.hp.gov.in/hppsc/content/Index/?qlid=12&Ls_is=15&lngid=1",
+"https://eemis.hp.nic.in/",
+"https://hppwd.hp.gov.in/recruitment-hppwd",
+"https://www.cuhimachal.ac.in/index.php/job",
+#Jharkhand
+"https://www.jpsc.gov.in/Examination-Links.php",
+"https://ranchi.nic.in/notice_category/recruitment/",
+"https://www.jpsc.gov.in/online_application.php",
+"https://www.sameti.org/vaccancy.php",
+"https://sahibganj.nic.in/notice_category/recruitment/",
+"https://giridih.nic.in/notice_category/recruitment/",
+"https://www.jhpolice.gov.in/recruitments",
+"https://www.jhpolice.gov.in/recruitments",
+#karnatak
+"https://kpsc.kar.nic.in/",
+"https://ksp.karnataka.gov.in/info-3/Recruitment/en",
+#Keral
+"https://www.keralapsc.gov.in/notifications",
+"https://jobs.kpesrb.kerala.gov.in/index.php/LatestNotifications",
+"https://cmd.kerala.gov.in/recruitment/",
+"https://keralapolice.gov.in/page/notification",
+#Madhya Pradesh
+"https://mppsc.mp.gov.in/Advertisement",
+"https://www.kirannewsagency.com/job/madhya-pradesh-govt-job.aspx",
+"https://esb.mp.gov.in/e_default.html",
+"https://pam.mp.gov.in/career/archive/",
+"https://iforms.mponline.gov.in/",
+#Maharashtra
+"https://mpsc.gov.in/adv_notification/8",
+"https://www.maharashtra.gov.in/Site/1548/Jobs",
+"https://mahabharti.in/nmk-district-wise-jobs/",
+"https://www.mahapolice.gov.in/police-recruitment.php",
+"https://bankofmaharashtra.in/current-openings",
+#Manipur
+"https://mpscmanipur.gov.in/Active_exam.html",
+"https://mpscmanipur.gov.in/examination.html",
+"https://mpscmanipur.gov.in/Exam_concluded.html",
+"https://affairscloud.com/jobs/manipur-govt-job/",
+"https://linkingsky.com/government-exams/government-jobs-in-manipur.html",
+"https://manipurtourism.gov.in/recruitment/",
+#Meghalaya
+"https://mpsc.nic.in/advertisements.html",
+"https://mpsc.nic.in/results.html",
+"https://mpsc.nic.in/advertisements.html",
+"https://mpsc.nic.in/news_announcements.html",
+"https://meghalaya.gov.in/recruitment",
+"https://megrecruitment.nic.in/rpa/login.htm",
+#Mizoram
+#Nagaland
+"https://npsc.nagaland.gov.in/notification",
+"https://npsc.nagaland.gov.in/latest-updates",
+"https://dpar.nagaland.gov.in/notifications/",
+#Odisha
+"https://odisha.gov.in/publication/advertisement",
+"https://www.ossc.gov.in/Public/Pages/View_Content.aspx?id=MeNGKau42B9VX4Nn6oZfXA==",
+#Punjab
+"https://www.ppsc.gov.in/",
+"https://www.ppsc.gov.in/TAB/SHOWTABLINKS.ASPX?SHOWTABID=24",
+"https://www.pgrkam.com/",
+"https://punjab.gov.in/impnotifications/",
+"https://www.pspcl.in/Recruitment",
+"https://www.punjabpolice.gov.in/Recruitment25.aspx",
+#Rajasthan
+"https://recruitment.rajasthan.gov.in/recruitmentservlet",
+"https://rpsc.rajasthan.gov.in/advertisements",
+"https://rpsc.rajasthan.gov.in/answerkeys",
+"https://rpsc.rajasthan.gov.in/results",
+"https://rpsc.rajasthan.gov.in/downloads",
+"https://police.rajasthan.gov.in/portal/RecruitmentsResults",
+#Sikkim
+"https://spsc.sikkim.gov.in/Advertisement.html",
+"https://spsc.sikkim.gov.in/Notices.html",
+"https://www.sikkim.gov.in/media/employment-news",
+"https://hcs.gov.in/hcs/recruitment",
+"https://police.sikkim.gov.in/visitor/notifications",
+#Tamilnadu
+"https://tnpsc.gov.in/english/notification.aspx",
+"https://www.tnpsc.gov.in/english/latest_results.aspx",
+"https://eservices.tnpolice.gov.in/CCTNSNICSDC/Recruitment",
+#Telangana
+"https://websitenew.tspsc.gov.in/notifications",
+"https://websitenew.tspsc.gov.in/Results",
+"https://websitenew.tspsc.gov.in/GOS.jsp",
+"https://mhsrb.telangana.gov.in/MHSRB/home.htm",
+"https://tshc.gov.in/showChildDocTypes?id=95",
+"https://www.tgprb.in/",
+#Tripura
+"https://tripura.gov.in/recruitments",
+"https://health.tripura.gov.in/jobs-and-recruitment",
+"https://tpsc.tripura.gov.in/calendar",
+"https://tpsc.tripura.gov.in/content/all-documents",
+"https://tpsc.tripura.gov.in/examdb",
+"https://tpsc.tripura.gov.in/",
+"https://tpsc.tripura.gov.in/akey",
+"https://tpsc.tripura.gov.in/admit_card",
+"https://tpsc.tripura.gov.in/notifications",
+#Uttar Pradesh
+"https://uppsc.up.nic.in/CandidatePages/Notifications.aspx",
+"https://uppsc.up.nic.in/Default.aspx",
+"https://sewayojan.up.nic.in/jobs.aspx",
+"https://www.upcareers.in/up-govt-jobs/",
+"https://upsssc.gov.in/News.aspx?id=1",
+"https://upsssc.gov.in/AllNotifications.aspx",
+"https://upsssc.gov.in/Default.aspx",
+"https://uppbpb.gov.in/",
+"https://uppbpb.gov.in/Home/Notice",
+"https://uppbpb.gov.in/Home/Notice#",
+"https://uppbpb.gov.in/Home/DirectRecruitment",
+"https://uppbpb.gov.in/Home/Result",
+#Uttarakhand
+"https://ukpsc.net.in/",
+"https://psc.uk.gov.in/candidate-corner/recruitment",
+"https://psc.uk.gov.in/candidate-corner/admitcards",
+"https://psc.uk.gov.in/candidate-corner/answerkey",
+"https://psc.uk.gov.in/candidate-corner/results",
+"https://psc.uk.gov.in/candidate-corner/interview",
+"https://uttarakhandpolice.uk.gov.in/career_recruitment",
+"https://rojgarprayag.uk.gov.in/jobs.aspx",
+#West Bengal
+"https://psc.wb.gov.in/whats_new.jsp",
+"https://psc.wb.gov.in/notification_announcement.jsp",
+"https://psc.wb.gov.in/advertisement.jsp",
+"https://psc.wb.gov.in/answer_key.jsp",
+"https://psc.wb.gov.in/results.jsp",
+"https://psc.wb.gov.in/written_test.jsp",
+"https://wbprb.applythrunet.co.in/",
+"https://www.wbhealth.gov.in/pages/career",
+"https://www.rrchubli.in/",
+#Jammu Kashmir
+"https://jkpsc.nic.in/",
+"https://jkssb.nic.in/Advertisement.html",
+"https://jkpsc.nic.in/Static/forms/Key.html",
+"https://jkpsc.nic.in/Static/forms/Active_Exams.html",
+"https://jkpsc.nic.in/Static/forms/recruitment.html",
+"https://www.jkpolice.gov.in/Notifications",
+"https://jkgad.nic.in/leftmenu/apply_now.aspx",
+#Ladakh
+"https://ladakh.gov.in/gazetted-corner/",
+"www.lahdssrb.in",
+"https://ladakh.gov.in/ssc-corner/",
+"https://kargil.nic.in/",
+"https://police.ladakh.gov.in/pages/recruitment.html",
+"https://www.nhmladakh.in/table1.html",
+"https://leh.nic.in/past-notices/recruitment/",
+#Andaman
+"https://apwd.and.nic.in/PublicInfo/Recruitment.php",
+"https://northmiddle.andaman.nic.in/past-notices/recruitment/",
+#Dadra and Nagar Haveli
+"https://daman.nic.in/jobs-daman-diu.aspx",
+"https://ddd.gov.in/notice-category/recruitments/",
+"https://dnh.gov.in/past-notices/job/",
+#Lakshadweep
+"https://lakshadweep.gov.in/past-notices/recruitment/",
+"https://lakshadweeppolice.gov.in/recruitment",
+"https://lakshadweep.gov.in/notice/recruitment"
+]
