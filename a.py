@@ -1,3 +1,4 @@
+
 import requests
 from bs4 import BeautifulSoup
 import os
@@ -15,7 +16,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 SENT_FILE = "sent_links.txt"
 print("[2] Environment variables loaded")
 
-# Send message to Telegram bot
+# Telegram send function
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {
@@ -30,15 +31,14 @@ def send_telegram(message):
     except Exception as e:
         print("[ERROR] Telegram Error:", e)
 
-# Notify script has started
 send_telegram("✅ Script has started")
 
-# Load AI classifier (optional)
+# Load classifier model (future use)
 print("[3] Loading AI model... please wait")
 classifier = pipeline("zero-shot-classification", model="valhalla/distilbart-mnli-12-1")
 print("[4] AI model loaded successfully")
 
-# Load sent links
+# Load sent links from file
 def load_sent_links():
     try:
         with open(SENT_FILE, "r") as f:
@@ -55,15 +55,19 @@ def save_sent_link(link):
         f.write(link + "\n")
     print(f"[6] Saved link: {link}")
 
-# Extract date using dateutil
-def extract_date(text):
-    try:
-        dt = dateparser.parse(text, fuzzy=True, dayfirst=True)
-        return dt.date()
-    except Exception:
-        return None
+# Try extracting a date smartly from any text
+def extract_possible_date(texts):
+    for text in texts:
+        if not text:
+            continue
+        try:
+            date = dateparser.parse(text, fuzzy=True, dayfirst=True)
+            return date.date()
+        except Exception:
+            continue
+    return None
 
-# Process a single page (no subpages)
+# Main check function
 def check_site(url, sent_links):
     print(f"[8] Checking site: {url}")
     headers = {
@@ -71,11 +75,12 @@ def check_site(url, sent_links):
                       "AppleWebKit/537.36 (KHTML, like Gecko) "
                       "Chrome/115.0.0.0 Safari/537.36"
     }
+
     try:
         r = requests.get(url, timeout=20, headers=headers)
         soup = BeautifulSoup(r.text, "html.parser")
         links = soup.find_all("a")
-        print(f"[9] Found {len(links)} links on the current page only")
+        print(f"[9] Found {len(links)} links")
 
         today = datetime.now().date()
 
@@ -86,11 +91,24 @@ def check_site(url, sent_links):
                 continue
 
             full_link = requests.compat.urljoin(url, href)
-            date_text = extract_date(text)
-            date_url = extract_date(full_link)
-            date = date_text or date_url
 
-            if date != today:
+            # Try collecting various text areas to detect date
+            nearby_texts = [text, full_link]
+
+            # Add surrounding text (like <td>, <li>, parent, sibling text etc.)
+            parent = link.find_parent()
+            if parent:
+                nearby_texts.append(parent.get_text(strip=True))
+            if link.previous_sibling and hasattr(link.previous_sibling, 'get_text'):
+                nearby_texts.append(link.previous_sibling.get_text(strip=True))
+            if link.next_sibling and hasattr(link.next_sibling, 'get_text'):
+                nearby_texts.append(link.next_sibling.get_text(strip=True))
+
+            # Attempt to extract a valid date
+            found_date = extract_possible_date(nearby_texts)
+
+            if found_date != today:
+                print(f"[10] Skipping: Date {found_date} is not today")
                 continue
 
             if full_link not in sent_links:
@@ -98,7 +116,7 @@ def check_site(url, sent_links):
                     f"<b>🆕 New Notification ({today.strftime('%d-%m-%Y')})</b>\n"
                     f"<b>📄 Page:</b> {url}\n"
                     f"<b>🔗 Link:</b> <a href='{full_link}'>{full_link}</a>\n"
-                    f"<b>📝 Text:</b> {text or 'No text'}"
+                    f"<b>📝 Text:</b> {text or 'No text found'}"
                 )
                 send_telegram(message)
                 save_sent_link(full_link)
@@ -109,7 +127,7 @@ def check_site(url, sent_links):
     except Exception as e:
         print(f"[ERROR] Failed to scrape {url}: {e}")
 
-# Main function
+# Main entry point
 def run_monitor():
     sent_links = load_sent_links()
     for url in urls:
