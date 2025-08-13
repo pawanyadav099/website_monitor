@@ -30,6 +30,8 @@ urls = [
 "https://portal-psc.ap.gov.in/",
 "https://portal-psc.ap.gov.in/HomePages/RecruitmentNotifications",
 "arunachalpradesh.gov.in",
+#Navodaya
+"https://cbseitms.rcil.gov.in/nvs/",
 #PSU_websites
 "https://www.hal-india.co.in/career",
 "https://udupicsl.com/index.php/careers/",
