@@ -47,6 +47,14 @@ urls = [
 "https://shs.bihar.gov.in/Advertisement",
 "https://csbc.bihar.gov.in/",
 "https://bpsc.bihar.gov.in/",
+"https://bpssc.bihar.gov.in/",
+"https://btsc.bihar.gov.in/recruitment",  
+"https://btsc.bihar.gov.in/result",
+"https://btsc.bihar.gov.in/admit-card",
+"https://btsc.bihar.gov.in/latest-update",
+"https://shs.bihar.gov.in/NoticeBoard",
+"https://shs.bihar.gov.in/Advertisement",
+    
 #chattisgarh
 "https://erojgar.cg.gov.in/LandingSite/en/Dist_Recruitments.aspx",
 "https://psc.cg.gov.in/htm/online_application.html",
@@ -258,3 +266,4 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
