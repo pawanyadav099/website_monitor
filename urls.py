@@ -43,6 +43,8 @@ urls = [
 "https://nhm.assam.gov.in/portlets/recruitment",
 "https://nhmssd.assam.gov.in/eHRMIS_latest/Recruitments/",
 "https://apsc.nic.in/advt_2025.php#advertisement",
+"https://phe.assam.gov.in/",
+"https://dme.assam.gov.in/documents-detail/recruitment",
 #bihar
 "https://shs.bihar.gov.in/Advertisement",
 "https://csbc.bihar.gov.in/",
@@ -219,6 +221,7 @@ urls = [
 "https://uppbpb.gov.in/Home/Notice#",
 "https://uppbpb.gov.in/Home/DirectRecruitment",
 "https://uppbpb.gov.in/Home/Result",
+"https://dgme.up.gov.in/Welcome/recruitement",
 #Uttarakhand
 "https://ukpsc.net.in/",
 "https://psc.uk.gov.in/candidate-corner/recruitment",
@@ -266,4 +269,5 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
 
