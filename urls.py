@@ -97,6 +97,8 @@ urls = [
 "https://kondagaon.gov.in/en/notice_category/recruitment/",
 "https://s351ef186e18dc00c2d31982567235c559.s3waas.gov.in/notice_category/recruitment/",
 "https://kawardha.gov.in/en/notice_category/recruitment/",
+#Delhi
+"https://dsssb.delhi.gov.in/notifications",
 #Goa
 "https://www.goa.gov.in/citizen/recruitment/",
 "https://goaonline.gov.in/Appln/Uil/DeptServices?__DocId=LEM&__ServiceId=LEM09",
@@ -269,5 +271,6 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
 
 
