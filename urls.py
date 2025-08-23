@@ -38,6 +38,14 @@ urls = [
 "https://www.icmr.gov.in/employment-opportunities",
 "https://www.iittp.ac.in/recruitment",
 "https://www.ibps.in/index.php/crp-updates/",
+#Andhra_pradesh
+"https://aphc.gov.in/recruitments.php",
+"https://portal-psc.ap.gov.in/",
+"https://portal-psc.ap.gov.in/HomePages/RecruitmentNotifications",
+"https://apdsc.apcfss.in/",
+"https://dme.ap.nic.in/",
+"https://bse.ap.gov.in/",
+"https://slprb.ap.gov.in/",
 #assam
 "https://slprbassam.in/",
 "https://nhm.assam.gov.in/portlets/recruitment",
@@ -271,6 +279,7 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
 
 
 
