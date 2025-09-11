@@ -1,5 +1,6 @@
 # url.py
 urls = [
+"https://jobshikhar.in",
 "https://india.gov.in",
 "https://www.mha.gov.in/en",
 "https://ssc.nic.in/Portal/Notices",
@@ -279,6 +280,7 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
 
 
 
