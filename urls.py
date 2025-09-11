@@ -1,6 +1,7 @@
 # url.py
 urls = [
 "https://jobshikhar.in",
+"https://cdn.digialm.com/EForms/configuredHtml/1258/95554/Index.html",
 "https://india.gov.in",
 "https://www.mha.gov.in/en",
 "https://ssc.nic.in/Portal/Notices",
@@ -280,6 +281,7 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
 
 
 
