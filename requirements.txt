@@ -4,3 +4,4 @@ transformers
 torch
 python-dateutil
 dateparser
+certifi
