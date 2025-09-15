@@ -180,6 +180,13 @@ urls = [
 #Odisha
 "https://odisha.gov.in/publication/advertisement",
 "https://www.ossc.gov.in/Public/Pages/View_Content.aspx?id=MeNGKau42B9VX4Nn6oZfXA==",
+"https://www.opsc.gov.in/Public/Pages/View_Content.aspx?id=iQvy8ONZ1XeCyxFZaY2SfA==",
+"https://www.osssc.gov.in/Public/OSSSC/Default.aspx",
+"https://odishapolice.gov.in/?utm_source",
+"https://opssb.nic.in/?utm_source",
+"https://orissahighcourt.nic.in/notification/",
+"https://nhmodisha.gov.in/notificationss/",
+"https://ssbodisha.ac.in/",
 #Punjab
 "https://www.ppsc.gov.in/",
 "https://www.ppsc.gov.in/TAB/SHOWTABLINKS.ASPX?SHOWTABID=24",
@@ -282,3 +289,4 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
