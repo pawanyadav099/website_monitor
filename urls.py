@@ -187,6 +187,7 @@ urls = [
 "https://orissahighcourt.nic.in/notification/",
 "https://nhmodisha.gov.in/notificationss/",
 "https://ssbodisha.ac.in/",
+"https://www.orissahighcourt.nic.in/recruitment-corner-portal/",
 #Punjab
 "https://www.ppsc.gov.in/",
 "https://www.ppsc.gov.in/TAB/SHOWTABLINKS.ASPX?SHOWTABID=24",
@@ -289,4 +290,5 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
 
