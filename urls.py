@@ -148,7 +148,7 @@ urls = [
 "https://keralapolice.gov.in/page/notification",
 #Madhya Pradesh
 "https://mppsc.mp.gov.in/Advertisement",
-"https://www.kirannewsagency.com/job/madhya-pradesh-govt-job.aspx",
+"https://iforms.mponline.gov.in/Form/GetAllNotification",
 "https://esb.mp.gov.in/e_default.html",
 "https://pam.mp.gov.in/career/archive/",
 "https://iforms.mponline.gov.in/",
@@ -290,5 +290,6 @@ urls = [
 "https://lakshadweeppolice.gov.in/recruitment",
 "https://lakshadweep.gov.in/notice/recruitment"
 ]
+
 
 
